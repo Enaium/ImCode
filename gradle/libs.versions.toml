@@ -1,0 +1,90 @@
+[versions]
+kotlin = "2.4.10"
+coroutines = "1.10.1"
+serialization = "1.8.0"
+sdl-kmp = "1.0.12"
+imgui-kmp = "1.0.12"
+lsp-kmp = "1.0.0"
+lsp-edit = "1.0.0"
+ktreesitter = "0.25.1"
+tree-sitter-agda = "1.3.3.2"
+tree-sitter-bash = "0.25.1.2"
+tree-sitter-c = "0.24.1.2"
+tree-sitter-c-sharp = "0.23.1.2"
+tree-sitter-cpp = "0.23.4.2"
+tree-sitter-css = "0.25.0.2"
+tree-sitter-embedded-template = "0.25.0.2"
+tree-sitter-go = "0.25.0.2"
+tree-sitter-haskell = "0.23.1.2"
+tree-sitter-html = "0.23.2.2"
+tree-sitter-java = "0.23.5.2"
+tree-sitter-javascript = "0.25.0.2"
+tree-sitter-json = "0.24.8.2"
+tree-sitter-julia = "0.25.0.2"
+tree-sitter-ocaml = "0.23.2.2"
+tree-sitter-php = "0.24.2.2"
+tree-sitter-python = "0.25.0.2"
+tree-sitter-regex = "0.25.0.2"
+tree-sitter-ruby = "0.23.1.2"
+tree-sitter-rust = "0.24.0.2"
+tree-sitter-scala = "0.24.0.2"
+tree-sitter-diff = "0.2.0.2"
+tree-sitter-glsl = "0.2.0.2"
+tree-sitter-kotlin = "0.3.8.2"
+tree-sitter-lua = "0.5.0.2"
+tree-sitter-markdown = "0.5.3.2"
+tree-sitter-properties = "0.3.0.2"
+tree-sitter-smali = "1.0.0.2"
+tree-sitter-toml = "0.7.0.2"
+tree-sitter-xml = "0.7.0.2"
+tree-sitter-yaml = "0.7.2.2"
+tree-sitter-tsx = "0.23.2.2"
+tree-sitter-typescript = "0.23.2.2"
+tree-sitter-verilog = "1.0.3.2"
+
+[libraries]
+sdl-kmp = { module = "cn.enaium.sdl:sdl-kmp", version.ref = "sdl-kmp" }
+imgui-kmp = { module = "cn.enaium.imgui:imgui-kmp", version.ref = "imgui-kmp" }
+lsp-kmp = { module = "cn.enaium:lsp-kmp", version.ref = "lsp-kmp" }
+lsp-edit = { module = "cn.enaium.imgui:lsp-edit", version.ref = "lsp-edit" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
+ktreesitter = { module = "io.github.tree-sitter:ktreesitter", version.ref = "ktreesitter" }
+treesitter-agda = { module = "cn.enaium.treesitter:treesitter-languages-agda-kmp", version.ref = "tree-sitter-agda" }
+treesitter-bash = { module = "cn.enaium.treesitter:treesitter-languages-bash-kmp", version.ref = "tree-sitter-bash" }
+treesitter-c = { module = "cn.enaium.treesitter:treesitter-languages-c-kmp", version.ref = "tree-sitter-c" }
+treesitter-c-sharp = { module = "cn.enaium.treesitter:treesitter-languages-c-sharp-kmp", version.ref = "tree-sitter-c-sharp" }
+treesitter-cpp = { module = "cn.enaium.treesitter:treesitter-languages-cpp-kmp", version.ref = "tree-sitter-cpp" }
+treesitter-css = { module = "cn.enaium.treesitter:treesitter-languages-css-kmp", version.ref = "tree-sitter-css" }
+treesitter-embedded-template = { module = "cn.enaium.treesitter:treesitter-languages-embedded-template-kmp", version.ref = "tree-sitter-embedded-template" }
+treesitter-go = { module = "cn.enaium.treesitter:treesitter-languages-go-kmp", version.ref = "tree-sitter-go" }
+treesitter-haskell = { module = "cn.enaium.treesitter:treesitter-languages-haskell-kmp", version.ref = "tree-sitter-haskell" }
+treesitter-html = { module = "cn.enaium.treesitter:treesitter-languages-html-kmp", version.ref = "tree-sitter-html" }
+treesitter-java = { module = "cn.enaium.treesitter:treesitter-languages-java-kmp", version.ref = "tree-sitter-java" }
+treesitter-javascript = { module = "cn.enaium.treesitter:treesitter-languages-javascript-kmp", version.ref = "tree-sitter-javascript" }
+treesitter-json = { module = "cn.enaium.treesitter:treesitter-languages-json-kmp", version.ref = "tree-sitter-json" }
+treesitter-julia = { module = "cn.enaium.treesitter:treesitter-languages-julia-kmp", version.ref = "tree-sitter-julia" }
+treesitter-ocaml = { module = "cn.enaium.treesitter:treesitter-languages-ocaml-kmp", version.ref = "tree-sitter-ocaml" }
+treesitter-php = { module = "cn.enaium.treesitter:treesitter-languages-php-kmp", version.ref = "tree-sitter-php" }
+treesitter-python = { module = "cn.enaium.treesitter:treesitter-languages-python-kmp", version.ref = "tree-sitter-python" }
+treesitter-regex = { module = "cn.enaium.treesitter:treesitter-languages-regex-kmp", version.ref = "tree-sitter-regex" }
+treesitter-ruby = { module = "cn.enaium.treesitter:treesitter-languages-ruby-kmp", version.ref = "tree-sitter-ruby" }
+treesitter-rust = { module = "cn.enaium.treesitter:treesitter-languages-rust-kmp", version.ref = "tree-sitter-rust" }
+treesitter-scala = { module = "cn.enaium.treesitter:treesitter-languages-scala-kmp", version.ref = "tree-sitter-scala" }
+treesitter-diff = { module = "cn.enaium.treesitter:treesitter-languages-diff-kmp", version.ref = "tree-sitter-diff" }
+treesitter-glsl = { module = "cn.enaium.treesitter:treesitter-languages-glsl-kmp", version.ref = "tree-sitter-glsl" }
+treesitter-kotlin = { module = "cn.enaium.treesitter:treesitter-languages-kotlin-kmp", version.ref = "tree-sitter-kotlin" }
+treesitter-lua = { module = "cn.enaium.treesitter:treesitter-languages-lua-kmp", version.ref = "tree-sitter-lua" }
+treesitter-markdown = { module = "cn.enaium.treesitter:treesitter-languages-markdown-kmp", version.ref = "tree-sitter-markdown" }
+treesitter-properties = { module = "cn.enaium.treesitter:treesitter-languages-properties-kmp", version.ref = "tree-sitter-properties" }
+treesitter-smali = { module = "cn.enaium.treesitter:treesitter-languages-smali-kmp", version.ref = "tree-sitter-smali" }
+treesitter-toml = { module = "cn.enaium.treesitter:treesitter-languages-toml-kmp", version.ref = "tree-sitter-toml" }
+treesitter-xml = { module = "cn.enaium.treesitter:treesitter-languages-xml-kmp", version.ref = "tree-sitter-xml" }
+treesitter-yaml = { module = "cn.enaium.treesitter:treesitter-languages-yaml-kmp", version.ref = "tree-sitter-yaml" }
+treesitter-tsx = { module = "cn.enaium.treesitter:treesitter-languages-tsx-kmp", version.ref = "tree-sitter-tsx" }
+treesitter-typescript = { module = "cn.enaium.treesitter:treesitter-languages-typescript-kmp", version.ref = "tree-sitter-typescript" }
+treesitter-verilog = { module = "cn.enaium.treesitter:treesitter-languages-verilog-kmp", version.ref = "tree-sitter-verilog" }
+
+[plugins]
+kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
