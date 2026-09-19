@@ -128,6 +128,7 @@ Everything persists as JSON in `~/.imcode/config.json`:
 | Settings | `Ctrl+Alt+S` |
 | Font size | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` |
 | Go to Definition / Find References / Rename | `F12` / `Shift+F12` / `F2` |
+| Show Context Actions (quick fixes) | `Alt+Enter` |
 
 `Ctrl` is the primary modifier (⌘ on macOS, exactly like IntelliJ keymaps).
 

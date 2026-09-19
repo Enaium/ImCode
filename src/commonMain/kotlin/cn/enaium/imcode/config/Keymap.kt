@@ -20,10 +20,12 @@ object KeyAction {
     const val FONT_RESET = "fontReset"
     const val NEW_WORKSPACE = "newWorkspace"
     const val WELCOME = "welcome"
+    const val QUICK_FIX = "quickFix"
 
     val ALL = listOf(
         NEW_FILE, OPEN_FILE, OPEN_FOLDER, SAVE, SAVE_ALL, CLOSE_TAB, FIND_FILES,
         RECENT_FILES, SETTINGS, FONT_UP, FONT_DOWN, FONT_RESET, NEW_WORKSPACE, WELCOME,
+        QUICK_FIX,
     )
 
     fun label(action: String): String = when (action) {
@@ -41,6 +43,7 @@ object KeyAction {
         FONT_RESET -> "Reset Font Size"
         NEW_WORKSPACE -> "New Workspace Window"
         WELCOME -> "Welcome Screen"
+        QUICK_FIX -> "Show Context Actions"
         else -> action
     }
 }
@@ -60,6 +63,7 @@ object DefaultShortcuts {
         KeyAction.FONT_UP to "Ctrl+=",
         KeyAction.FONT_DOWN to "Ctrl+-",
         KeyAction.FONT_RESET to "Ctrl+0",
+        KeyAction.QUICK_FIX to "Alt+Enter",
     )
 }
 

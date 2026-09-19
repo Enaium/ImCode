@@ -125,14 +125,11 @@ class WorkspaceWindow(val dir: String) {
     private var signatureRequested = false
     private var signatureActive = false
 
-    /** Rename dialog state. */
-    private var renameOpen = false
+    /** Inline rename session (null when inactive). */
+    private var inlineRename: InlineRenameSession? = null
 
-    /** Caret position when the rename editor opened (leaving it exits). */
-    private var renamePopupCursor: DocPos? = null
-
-    /** Focus the name field on the first frame the dialog renders. */
-    private var renameFocusInput = false
+    /** Diagnostics markers saved while rename highlights are shown. */
+    private var renameMarkerBackup: HashMap<Int, cn.enaium.lsp.edit.EditorMarker>? = null
 
     /** Code actions for the last request (rendered in the list window). */
     private var codeActions: List<cn.enaium.lsp.model.CodeAction> = emptyList()
@@ -142,8 +139,6 @@ class WorkspaceWindow(val dir: String) {
 
     /** Document the actions were requested for. */
     private var codeActionDoc: Document? = null
-    private var renameTarget: Pair<Int, Int>? = null
-    private var renameText: String? = null
 
     /** References panel state. */
     private var referencesOpen = false
@@ -314,7 +309,7 @@ class WorkspaceWindow(val dir: String) {
         pendingClosePath?.let { renderUnsavedModal(core, it) }
         if (core.pendingCloseWs == this) renderWorkspaceCloseModal(core)
         if (newFileOpen[0]) renderNewFileModal(core)
-        if (renameOpen) renderRenameModal(core)
+        renderInlineRename(core)
         if (codeActionsOpen) renderCodeActionsWindow(core)
         if (referencesOpen) renderReferencesWindow(core)
 
@@ -1089,56 +1084,112 @@ class WorkspaceWindow(val dir: String) {
     // ==================== rename / references (host UI) ====================
 
     /** Opens the rename dialog for the symbol under the caret. */
+    /**
+     * Inline rename: the symbol under the caret is edited in place (over its
+     * name range), every other occurrence is highlighted live, Enter asks the
+     * server to rename and Esc cancels.
+     */
     fun openRename(core: AppCore) {
         val doc = core.activeDoc() ?: return
-        val pos = doc.editor.cursor
-        val wordStart = doc.editor.buffer.line(pos.line)
-            .substring(0, pos.index).takeLastWhile { it.isLetterOrDigit() || it == '_' }
-        renameTarget = pos.line to pos.index
-        renameText = wordStart
-        renameOpen = true
-        renamePopupCursor = pos
-        renameFocusInput = true
-        // beginPopupModal only renders once the popup has been opened —
-        // without this the dialog never appeared (the menu item looked dead).
-        ImGui.openPopup("Rename Symbol")
+        val editor = doc.editor
+        val pos = editor.cursor
+        val lineText = editor.buffer.line(pos.line)
+        var start = pos.index
+        var end = pos.index
+        while (start > 0 && isRenameChar(lineText[start - 1])) start--
+        while (end < lineText.length && isRenameChar(lineText[end])) end++
+        if (start == end) return
+        inlineRename = InlineRenameSession(
+            path = doc.path,
+            line = pos.line,
+            startIndex = start,
+            endIndex = end,
+            original = lineText.substring(start, end),
+            text = lineText.substring(start, end),
+            screenX = editor.posScreenX(pos.line, start),
+            screenY = editor.posScreenY(pos.line) ?: editor.caretScreenY(),
+        )
     }
 
-    fun renderRenameModal(core: AppCore) {
-        if (!renameOpen) return
-        if (ImGui.beginPopupModal("Rename Symbol", null, ImGuiWindowFlags.ALWAYS_AUTO_RESIZE)) {
-            val doc = core.activeDoc()
-            // The popup does not block ImGui key polling, so arrows still
-            // move the caret; leaving the symbol (or Esc) exits edit mode.
-            val caretLeft = doc == null || doc.editor.cursor != renamePopupCursor
-            if (ImGui.isKeyPressed(cn.enaium.imgui.ImGuiKey.ESCAPE) || caretLeft) {
-                renameOpen = false
-                ImGui.closeCurrentPopup()
-                ImGui.endPopup()
-                return
-            }
-            ImGui.text("New name:")
-            ImGui.setNextItemWidth(320f)
-            if (renameFocusInput) ImGui.setKeyboardFocusHere()
-            renameText = ImGui.inputText("##rename-${dir}", renameText ?: "") ?: renameText
-            renameFocusInput = false
-            if (ImGui.button("Rename", ImVec2(90f, 0f))) {
-                val newName = renameText?.trim()
-                if (newName != null && newName.isNotEmpty() && doc != null && renameTarget != null) {
-                    val (line, idx) = renameTarget!!
-                    core.lsp.requestRename(doc, Position(line, idx), newName) { edit ->
-                        if (edit != null) core.applyWorkspaceEditPublic(edit)
-                    }
+    private fun isRenameChar(c: Char): Boolean = c.isLetterOrDigit() || c == '_'
+
+    /** Inline rename editor drawn over the symbol's name range. */
+    private fun renderInlineRename(core: AppCore) {
+        val r = inlineRename ?: return
+        val doc = core.documents.get(r.path)
+        if (doc == null || core.activeDoc()?.path != r.path) {
+            endInlineRename(doc)
+            return
+        }
+        ImGui.setNextWindowPos(ImVec2(r.screenX, r.screenY - 2f), cn.enaium.imgui.ImGuiCond.ALWAYS)
+        ImGui.setNextWindowSize(ImVec2(180f, 0f), cn.enaium.imgui.ImGuiCond.ALWAYS)
+        ImGui.begin(
+            "##inline-rename-${dir}",
+            null,
+            ImGuiWindowFlags.NO_TITLE_BAR or ImGuiWindowFlags.NO_RESIZE or ImGuiWindowFlags.NO_MOVE or
+                ImGuiWindowFlags.ALWAYS_AUTO_RESIZE or ImGuiWindowFlags.NO_SCROLLBAR or
+                ImGuiWindowFlags.NO_FOCUS_ON_APPEARING or ImGuiWindowFlags.NO_NAV_FOCUS,
+        )
+        if (r.focusInput) {
+            ImGui.setKeyboardFocusHere()
+        }
+        val edited = ImGui.inputText("##ir-${dir}", r.text) ?: r.text
+        val cur = inlineRename!!
+        if (ImGui.isKeyPressed(cn.enaium.imgui.ImGuiKey.ESCAPE)) {
+            endInlineRename(doc)
+            ImGui.end()
+            return
+        }
+        if (ImGui.isKeyPressed(cn.enaium.imgui.ImGuiKey.ENTER) && edited.isNotBlank()) {
+            val newName = edited.trim()
+            endInlineRename(doc)
+            ImGui.end()
+            if (newName != cur.original) {
+                core.lsp.requestRename(doc, Position(cur.line, cur.startIndex), newName) { edit ->
+                    if (edit != null) core.applyWorkspaceEditPublic(edit)
                 }
-                renameOpen = false
-                ImGui.closeCurrentPopup()
             }
-            ImGui.sameLine()
-            if (ImGui.button("Cancel", ImVec2(90f, 0f))) {
-                renameOpen = false
-                ImGui.closeCurrentPopup()
+            return
+        }
+        inlineRename = cur.copy(text = edited, focusInput = false)
+        // Live linkage: tint every occurrence of the original name.
+        applyRenameHighlights(doc, cur.original)
+        ImGui.end()
+    }
+
+    /** Marks all whole-word occurrences of [symbol] with a selection tint. */
+    private fun applyRenameHighlights(doc: Document, symbol: String) {
+        if (renameMarkerBackup == null) renameMarkerBackup = HashMap(doc.editor.markers)
+        val word = Regex("\\b" + Regex.escape(symbol) + "\\b")
+        val lineColor = doc.editor.palette[cn.enaium.lsp.edit.PaletteIndex.LINE_NUMBER]
+        val hl = doc.editor.palette[cn.enaium.lsp.edit.PaletteIndex.SELECTION]
+        val markers = doc.editor.markers
+        for (l in 0 until doc.editor.buffer.lineCount()) {
+            val text = doc.editor.buffer.line(l)
+            val ranges = word.findAll(text).map { it.range.first to it.range.last + 1 }.toList()
+            if (ranges.isEmpty()) {
+                val saved = renameMarkerBackup?.get(l)
+                if (saved != null) markers[l] = saved else markers.remove(l)
+                continue
             }
-            ImGui.endPopup()
+            markers[l] = cn.enaium.lsp.edit.EditorMarker(
+                lineNumberColor = lineColor,
+                underlineColor = hl,
+                underlineRanges = ranges,
+            )
+        }
+        doc.editor.invalidateAll()
+    }
+
+    /** Leaves inline rename, restoring the diagnostics markers. */
+    private fun endInlineRename(doc: Document?) {
+        inlineRename = null
+        val backup = renameMarkerBackup ?: return
+        renameMarkerBackup = null
+        doc?.editor?.markers?.let { markers ->
+            markers.clear()
+            markers.putAll(backup)
+            doc.editor.invalidateAll()
         }
     }
 
@@ -1254,4 +1305,17 @@ class WorkspaceWindow(val dir: String) {
 }
 
 /** Tiny 4-tuple for request-key tracking. */
+/** One inline-rename session: the symbol range being edited in place. */
+private data class InlineRenameSession(
+    val path: String,
+    val line: Int,
+    val startIndex: Int,
+    val endIndex: Int,
+    val original: String,
+    val text: String,
+    val screenX: Float,
+    val screenY: Float,
+    val focusInput: Boolean = true,
+)
+
 private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)

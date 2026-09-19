@@ -143,5 +143,6 @@ internal fun runAction(core: AppCore, action: String, ws: WorkspaceWindow?, doc:
         KeyAction.FONT_RESET -> core.adjustFontTo(13f)
         KeyAction.NEW_WORKSPACE -> core.requestOpenFolder()
         KeyAction.WELCOME -> core.showWelcome = true
+        KeyAction.QUICK_FIX -> if (doc != null) ws?.openCodeActions(core)
     }
 }
