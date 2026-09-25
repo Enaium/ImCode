@@ -18,7 +18,9 @@ class KeymapTest {
         assertNotNull(chord)
         assertEquals(setOf("Ctrl", "Shift"), chord.mods)
         assertEquals("F4", chord.key)
-        assertEquals("Ctrl+Shift+F4", chord.display())
+        // The label is platform-specific (macOS shows Cmd for Ctrl), so the
+        // contract is the round trip: the label renders the same chord back.
+        assertEquals(chord, Keymap.parse(chord.display()))
     }
 
     @Test
@@ -33,7 +35,7 @@ class KeymapTest {
         for ((action, chordText) in DefaultShortcuts.IDEA) {
             val chord = Keymap.parse(chordText)
             assertNotNull(chord, "default chord '$chordText' for '$action' must parse")
-            assertEquals(chordText, chord.display())
+            assertEquals(chord, Keymap.parse(chord.display()), "'$chordText' must render back to itself")
         }
     }
 

@@ -1,11 +1,12 @@
 [versions]
+xicons = "1.0.3"
 kotlin = "2.4.10"
 coroutines = "1.10.1"
 serialization = "1.8.0"
 sdl-kmp = "1.0.12"
-imgui-kmp = "1.0.12"
-lsp-kmp = "1.0.0"
-lsp-edit = "1.0.1"
+imgui-kmp = "1.0.16"
+lsp-kmp = "1.0.1"
+lsp-edit = "1.0.2"
 ktreesitter = "0.25.1"
 tree-sitter-agda = "1.3.3.2"
 tree-sitter-bash = "0.25.1.2"
@@ -45,6 +46,8 @@ tree-sitter-verilog = "1.0.3.2"
 [libraries]
 sdl-kmp = { module = "cn.enaium.sdl:sdl-kmp", version.ref = "sdl-kmp" }
 imgui-kmp = { module = "cn.enaium.imgui:imgui-kmp", version.ref = "imgui-kmp" }
+xicons-imgui-intellij = { module = "cn.enaium.xicons:xicons-imgui-intellij", version.ref = "xicons" }
+xicons-imgui-core = { module = "cn.enaium.xicons:xicons-imgui-core", version.ref = "xicons" }
 lsp-kmp = { module = "cn.enaium:lsp-kmp", version.ref = "lsp-kmp" }
 lsp-edit = { module = "cn.enaium.imgui:lsp-edit", version.ref = "lsp-edit" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }

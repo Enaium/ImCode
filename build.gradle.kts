@@ -22,6 +22,14 @@ kotlin {
         commonMain.dependencies {
             implementation(libs.sdl.kmp)
             implementation(libs.imgui.kmp)
+            // xicons-imgui-intellij-g was never published (Maven Central has
+            // a..z minus g) though the POM references it — hence exclude.
+            // Letter groups compile against core but do not re-export it
+            // (Icon/IconData live there), so it is declared explicitly.
+            implementation(libs.xicons.imgui.core)
+            implementation(libs.xicons.imgui.intellij.get().toString()) {
+                exclude(group = "cn.enaium.xicons", module = "xicons-imgui-intellij-g")
+            }
             implementation(libs.lsp.kmp)
             implementation(libs.lsp.edit)
             implementation(libs.kotlinx.coroutines.core)

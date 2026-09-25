@@ -27,11 +27,15 @@ class HubView(
         val menuH = ImGui.getFrameHeight()
         if (core.showWelcome) welcome.draw(core, menuH)
         drawAux()
-        drawStatusBar()
+        StatusBar.draw(core, null)
     }
 
     /** Workspace mode: only the floating aux windows (settings/search/about/...). */
     fun drawAux() {
+        // Floating UI belongs to the window that asked for it: drawn here, in
+        // every window, it would otherwise appear once per project (and with
+        // the previous primary-only rule, on top of the wrong project).
+        if (!core.ownsFloatingUi(ctx.windowId)) return
         if (core.searchScopeDir != null) {
             searchWindow.show(core.searchScopeDir)
             core.searchScopeDir = null
@@ -42,8 +46,12 @@ class HubView(
             core.symbolSearchWindow.draw(core)
         }
         if (core.showAbout) drawAbout()
+        if (core.showNotifications) NotificationView.drawWindow(core)
+        if (core.showGotoLine) GotoLineWindow.draw(core, ctx.workspace)
+        ProgressWindow.draw(core)
         drawConfirmModal()
         core.fileDialogs.render()
+        OpenFolderDialog.draw(core)
     }
 
     private fun drawConfirmModal() {
@@ -85,46 +93,4 @@ class HubView(
         ImGui.end()
     }
 
-    private fun drawStatusBar() {
-        val screenW = ImGui.getIO().displaySize.x
-        val screenH = ImGui.getIO().displaySize.y
-        val barH = 26f
-        ImGui.setCursorPos(ImVec2(0f, screenH - barH))
-        ImGui.beginChild(
-                "##statusbar",
-                ImVec2(screenW, barH),
-                ImGuiChildFlags.BORDERS,
-                ImGuiWindowFlags.NO_TITLE_BAR or ImGuiWindowFlags.NO_MOVE or ImGuiWindowFlags.NO_RESIZE or
-                    ImGuiWindowFlags.NO_SCROLLBAR or ImGuiWindowFlags.NO_SAVED_SETTINGS,
-            )
-        val doc = core.activeDoc()
-        if (doc != null) {
-            val cursor = doc.editor.cursor
-            ImGui.text("Ln ${cursor.line + 1}, Col ${cursor.index + 1}")
-            ImGui.sameLine()
-            ImGui.text(if (doc.dirty) "modified" else "saved")
-            ImGui.sameLine()
-            ImGui.text("${doc.errorCount}E ${doc.warningCount}W")
-            ImGui.sameLine()
-            ImGui.text(doc.languageId)
-        } else {
-            ImGui.text("Ready")
-        }
-        // Work-done progress (e.g. kotlin-lsp indexing): a bar with the
-        // server-provided title/message/percentage while work is active.
-        core.lsp.activeProgress().firstOrNull()?.let { p ->
-            ImGui.sameLine()
-            val overlay = buildString {
-                append(p.title)
-                p.message?.let { if (isNotEmpty()) append(" — "); append(it) }
-                p.percentage?.let { append(" "); append(it); append("%") }
-            }
-            ImGui.progressBar((p.percentage ?: 0) / 100f, ImVec2(200f, 0f), overlay)
-        }
-        ImGui.sameLine(screenW - 460f)
-        ImGui.textDisabled(core.activeServerStatus())
-        ImGui.sameLine(screenW - 120f)
-        ImGui.text("font %.1f".format(core.config.fontSize))
-        ImGui.endChild()
-    }
 }

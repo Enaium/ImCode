@@ -63,10 +63,61 @@ data class EditorConfig(
     val theme: String = "",
 )
 
+/** A debug adapter that debugs the files matching [patterns]. */
+@Serializable
+data class DebugAdapterConfig(
+    val name: String = "python",
+    /** File patterns this adapter handles, e.g. `*.py`. */
+    val patterns: List<String> = listOf("*.py"),
+    /** Command line, e.g. `python3 -m debugpy.adapter`. */
+    val command: List<String> = listOf("python3", "-m", "debugpy.adapter"),
+    /** The command line as typed (quotes preserved); see [LspServer.commandString]. */
+    val commandString: String? = null,
+    /**
+     * The `launch` request arguments as JSON, with `$FILE` and `$DIR`
+     * substituted when a session starts — e.g.
+     * `{"type":"python","request":"launch","program":"$FILE","console":"internalConsole"}`.
+     */
+    val launchArgs: String = "",
+    val env: Map<String, String> = emptyMap(),
+)
+
+/** What opening a folder does while a window is already open. */
+object OpenFolderPolicy {
+    /** Always a new window. */
+    const val NewWindow = "newWindow"
+
+    /** Reuse the window that has the focus. */
+    const val CurrentWindow = "currentWindow"
+
+    /** Ask which of the two, every time. */
+    const val Ask = "ask"
+
+    val ALL = listOf(NewWindow, CurrentWindow, Ask)
+
+    fun label(policy: String): String = when (policy) {
+        NewWindow -> "New window"
+        CurrentWindow -> "Current window"
+        else -> "Ask every time"
+    }
+}
+
 /** Application configuration, persisted as JSON in `~/.imcode/config.json`. */
 @Serializable
 data class Config(
     val fontSize: Float = 13f,
+    /**
+     * TTF/OTF/TTC used for all UI text; empty keeps ImGui's built-in font.
+     * Read when a window builds its font atlas, so a change applies after
+     * ImCode is restarted.
+     */
+    val mainFontPath: String = "",
+    /**
+     * TTF/OTF/TTC merged into the main font so glyphs the main font lacks
+     * (CJK, symbols) render instead of tofu boxes; empty merges nothing.
+     * Applies after a restart, like [mainFontPath].
+     */
+    val fallbackFontPath: String = "",
     /** Log every LSP RPC frame into the "LSP" output tab. */
     val rpcLogging: Boolean = true,
     /** Reopen the previous session's workspaces on startup; off = show the project list page. */
@@ -76,6 +127,15 @@ data class Config(
     val recentFiles: List<RecentFile> = emptyList(),
     val workspaces: List<WorkspaceEntry> = emptyList(),
     val lspServers: List<LspServer> = emptyList(),
+    /** Debug adapters, matched to a file the same way language servers are. */
+    val debugAdapters: List<DebugAdapterConfig> = emptyList(),
+    /** Where "Open Folder" puts the folder (see [OpenFolderPolicy]). */
+    val openFolderPolicy: String = OpenFolderPolicy.Ask,
+    /**
+     * Folders opened before, newest first. Unlike `workspaces` (the windows
+     * that happen to be open) this is a history and survives restarts.
+     */
+    val recentFolders: List<RecentFile> = emptyList(),
     val editor: EditorConfig = EditorConfig(),
 ) {
     fun effectiveShortcuts(): Map<String, String> = DefaultShortcuts.IDEA + shortcuts

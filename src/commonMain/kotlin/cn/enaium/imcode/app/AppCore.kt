@@ -2,6 +2,7 @@ package cn.enaium.imcode.app
 
 import cn.enaium.imcode.config.Config
 import cn.enaium.imcode.config.ConfigStore
+import cn.enaium.imcode.config.OpenFolderPolicy
 import cn.enaium.imcode.config.RecentFile
 import cn.enaium.imcode.config.WorkspaceEntry
 import cn.enaium.imcode.editor.Document
@@ -31,6 +32,13 @@ import kotlinx.coroutines.launch
  * render thread of the owning window (mutations arrive via [Mailbox]).
  */
 class AppCore(val mailbox: Mailbox) {
+    init {
+        // Every logged error becomes a balloon: the call sites (LSP start
+        // failures, file read/save failures) are exactly what a user must not
+        // miss, and routing it here keeps them from having to remember.
+        OutputLog.onError = { tag, text -> cn.enaium.imcode.ui.Notifications.error(tag, text) }
+    }
+
     var config: Config = ConfigStore.load().let { cfg ->
         if (cfg.lspServers.isEmpty()) {
             cfg.copy(lspServers = listOf(cn.enaium.imcode.config.LspServer(command = listOf("kotlin-lsp", "--stdio"))))
@@ -48,6 +56,9 @@ class AppCore(val mailbox: Mailbox) {
     )
     val searchService = SearchService()
     val fileDialogs = FileDialogs()
+
+    /** Debug sessions: adapters, breakpoints and the toolbar's actions. */
+    val debug = DebugController(this)
 
     /**
      * Shared markdown renderer config (hover docs with fenced code blocks).
@@ -68,11 +79,73 @@ class AppCore(val mailbox: Mailbox) {
     val workspaces = ArrayList<WorkspaceWindow>()
     var focusedWorkspace: WorkspaceWindow? = null
 
+    /**
+     * Window currently drawing, set by the host every frame. Actions taken
+     * from that window's UI (menu, panes, shortcuts) run while it is set, so
+     * anything they open knows which window asked for it.
+     */
+    var currentWindowId: Int = -1
+
+    /** Window that opened the floating UI; -1 when nothing is open. */
+    var uiWindowId: Int = -1
+
+    /**
+     * True when [windowId] is the window the floating UI belongs to.
+     *
+     * Settings, search, the file dialogs and the confirm modal are process
+     * state, not per-window state: without an owner they would be drawn by
+     * every window (and, before this, by the primary window only, which put a
+     * dialog opened in one project's window on top of the other project).
+     */
+    fun ownsFloatingUi(windowId: Int): Boolean = uiWindowId == -1 || uiWindowId == windowId
+
+    /**
+     * True while one of the IDE's own text fields owns the keyboard (settings,
+     * search, symbol search, Go to Line, the new-file prompt).
+     *
+     * The editor reads typed characters from the SDL text-input events rather
+     * than from ImGui, so without this a dialog and the code behind it both
+     * receive what the user types into the dialog.
+     */
+    val hostFieldFocused: Boolean
+        get() = showSearch || showSettings || showSymbolSearch || showGotoLine
+
     var showSettings = false
+        set(value) {
+            if (value) uiWindowId = currentWindowId
+            field = value
+        }
     var showSearch = false
+        set(value) {
+            if (value) uiWindowId = currentWindowId
+            field = value
+        }
     var showSymbolSearch = false
+        set(value) {
+            if (value) uiWindowId = currentWindowId
+            field = value
+        }
     var showWelcome = true
     var showAbout = false
+        set(value) {
+            if (value) uiWindowId = currentWindowId
+            field = value
+        }
+    var showNotifications = false
+        set(value) {
+            if (value) uiWindowId = currentWindowId
+            field = value
+        }
+    var showGotoLine = false
+        set(value) {
+            if (value) uiWindowId = currentWindowId
+            field = value
+        }
+    var showProgress = false
+        set(value) {
+            if (value) uiWindowId = currentWindowId
+            field = value
+        }
 
     val symbolSearchWindow = cn.enaium.imcode.ui.SymbolSearchWindow()
 
@@ -83,8 +156,12 @@ class AppCore(val mailbox: Mailbox) {
     var exitRequested = false
     var canExitNow = false
 
-    /** Confirm modal state; rendered by the hub window. */
+    /** Confirm modal state; rendered by the window that asked for it. */
     var confirmText: String? = null
+        set(value) {
+            if (value != null) uiWindowId = currentWindowId
+            field = value
+        }
     var confirmAction: (() -> Unit)? = null
     var confirmOpenOnce = false
 
@@ -167,12 +244,17 @@ class AppCore(val mailbox: Mailbox) {
             showWelcome = true
             return
         }
-        for (entry in config.workspaces) {
-            // Skip entries whose directory no longer exists or is blank:
-            // restoring them would open a blank hub window that swallows
-            // the primary window's workspace slot.
-            val dir = entry.dir
-            if (dir.isBlank() || !ioFile(dir).isDirectory) continue
+        // Reopen the project the user was working on last, not every project
+        // in the persisted list: that list doubles as the welcome page's
+        // project record, so restoring all of it opened one window per entry
+        // (stale projects included). The most recent folder is the head of
+        // recentFolders; a config that has none falls back to the last entry.
+        val last = config.recentFolders.firstOrNull()?.path
+        val entry = last?.let { dir -> config.workspaces.lastOrNull { it.dir == dir } }
+            ?: config.workspaces.lastOrNull()
+        // Skip an entry whose directory no longer exists: restoring it would
+        // open a blank window that swallows the primary window's slot.
+        if (entry != null && entry.dir.isNotBlank() && ioFile(entry.dir).isDirectory) {
             openWorkspaceWindow(entry)
         }
         if (workspaces.isEmpty()) showWelcome = true
@@ -193,6 +275,11 @@ class AppCore(val mailbox: Mailbox) {
         }
         workspaces.add(ws)
         showWelcome = false
+        // A fresh open (not a restored session) is a folder the user chose.
+        if (entry == null) {
+            addRecentFolder(ws.dir)
+            saveState()
+        }
         onOpenWorkspaceWindow?.invoke(ws)
 
         for (path in (entry?.openFiles ?: emptyList())) {
@@ -267,6 +354,10 @@ class AppCore(val mailbox: Mailbox) {
 
     /** Scope for the next "Find in Files" opening (set by the triggering window). */
     var searchScopeDir: String? = null
+        set(value) {
+            if (value != null) uiWindowId = currentWindowId
+            field = value
+        }
 
     // --type-test diagnostics: injects characters into the active editor
     var typeTestRemaining = 0
@@ -288,13 +379,82 @@ class AppCore(val mailbox: Mailbox) {
     }
 
     fun requestOpenFolder() {
+        uiWindowId = currentWindowId
         fileDialogs.pickDirectory("Open Workspace Folder") { dirs ->
             val dir = dirs.firstOrNull() ?: return@pickDirectory
             val dirFile = ioFile(dir)
-            if (!dirFile.isDirectory) return@pickDirectory
-            workspaces.firstOrNull { it.dir == dirFile.absolutePath }?.let { focusWorkspace(it); return@pickDirectory }
-            openWorkspaceWindow(dir = dirFile.absolutePath)
+            if (!dirFile.isDirectory) {
+                OutputLog.warn("App", "open folder: $dir is not a directory; ignored")
+                return@pickDirectory
+            }
+            openFolder(dirFile.absolutePath)
         }
+    }
+
+    /**
+     * Opens [dir] the way [Config.openFolderPolicy] says: focus it when it is
+     * already open, reuse the current window, open a new one, or ask first.
+     * Every folder opened this way is remembered in [Config.recentFolders].
+     */
+    fun openFolder(dir: String) {
+        workspaces.firstOrNull { it.dir == dir }?.let {
+            focusWorkspace(it)
+            return
+        }
+        addRecentFolder(dir)
+        saveState()
+        OutputLog.info("App", "open folder: $dir (policy=${config.openFolderPolicy})")
+        when (config.openFolderPolicy) {
+            OpenFolderPolicy.CurrentWindow -> adoptInCurrentWindow(dir)
+            OpenFolderPolicy.NewWindow -> openWorkspaceWindow(dir = dir)
+            else -> {
+                pendingFolder = dir
+                pendingFolderOpenOnce = true
+            }
+        }
+    }
+
+    /** Folder waiting for the user to pick a window (the "ask" policy). */
+    var pendingFolder: String? = null
+
+    /** True while the choice modal still needs opening. */
+    var pendingFolderOpenOnce = false
+
+    /** Host hook: put [ws] into the focused window; false when there is none. */
+    var onAdoptWorkspaceInCurrentWindow: ((WorkspaceWindow) -> Boolean)? = null
+
+    /**
+     * Replaces the focused window's workspace with [dir]: the old one's
+     * documents close, the window keeps its place (its size and position).
+     */
+    fun adoptInCurrentWindow(dir: String) {
+        val ws = WorkspaceWindow(dir)
+        val adopted = onAdoptWorkspaceInCurrentWindow?.invoke(ws) == true
+        if (!adopted) {
+            OutputLog.info("App", "no window to adopt into; opening $dir in a new one")
+            openWorkspaceWindow(dir = dir)
+            return
+        }
+        OutputLog.info("App", "adopted $dir into the focused window")
+        val previous = focusedWorkspace
+        if (previous != null && previous !== ws) {
+            workspaces.remove(previous)
+            // The old workspace's editors belong to it, not to the window.
+            for (doc in documents.openDocs.toList()) {
+                if (doc.workspaceDir == previous.dir) documents.close(doc)
+            }
+        }
+        workspaces.add(ws)
+        focusWorkspace(ws)
+        showWelcome = false
+    }
+
+    /** Records a folder in the recent list (newest first). */
+    fun addRecentFolder(dir: String) {
+        val list = config.recentFolders.filter { it.path != dir }
+        config = config.copy(
+            recentFolders = (listOf(RecentFile(dir, Platform.currentTimeMillis())) + list).take(20),
+        )
     }
 
     private var dialogTargetWs: WorkspaceWindow? = null
@@ -477,34 +637,25 @@ class AppCore(val mailbox: Mailbox) {
     private fun applyEditsToDoc(uri: String, textEdits: List<TextEdit>) {
         val path = cn.enaium.imcode.util.Uri.uriToPath(uri) ?: return
         val doc = documents.get(path) ?: return
-        val newText = applyTextEdits(doc.text(), textEdits)
-        if (newText != null && newText != doc.text()) {
-            doc.editor.setText(newText)
-            doc.dirty = true
-            doc.version++
+        // Apply through the editor's batch API: setText() bypassed
+        // onTextChange entirely, so the server was never told about the edit
+        // (stale diagnostics) and the highlight caches kept spans for the old
+        // text (mismatched ranges). It also cleared the undo stack.
+        // Bottom-up so earlier edits do not shift later ranges.
+        val ordered = textEdits.sortedWith(
+            compareByDescending<TextEdit> { it.range.start.line }
+                .thenByDescending { it.range.start.character },
+        )
+        val edits = ordered.map {
+            cn.enaium.lsp.edit.EditorEdit(
+                cn.enaium.lsp.edit.DocPos(it.range.start.line, it.range.start.character),
+                cn.enaium.lsp.edit.DocPos(it.range.end.line, it.range.end.character),
+                it.newText,
+            )
         }
+        // onTextChange (fired by applyEdits) updates dirty/version and sends
+        // the didChange notification.
+        doc.editor.applyEdits(edits)
     }
 
-    private fun applyTextEdits(text: String, edits: List<TextEdit>): String? {
-        if (edits.isEmpty()) return null
-        val lineStarts = ArrayList<Int>()
-        lineStarts.add(0)
-        for (i in text.indices) if (text[i] == '\n') lineStarts.add(i + 1)
-
-        fun offset(pos: cn.enaium.lsp.model.Position): Int {
-            val line = pos.line.coerceIn(0, lineStarts.size - 1)
-            val base = lineStarts[line]
-            return (base + pos.character).coerceIn(base, text.length)
-        }
-
-        val ordered = edits.sortedByDescending { offset(it.range.start) }
-        var result = text
-        for (edit in ordered) {
-            val start = offset(edit.range.start)
-            val end = offset(edit.range.end)
-            if (start < 0 || end < start || end > result.length) continue
-            result = result.substring(0, start) + edit.newText + result.substring(end)
-        }
-        return if (result == text) null else result
-    }
 }

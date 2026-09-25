@@ -352,7 +352,11 @@ class DocumentManager(
      * request is simply superseded by the next one.
      */
     private fun scheduleAutoCompletion(doc: Document, ops: List<EditOp>) {
-        if (doc.suppressAutoCompletion) return
+        if (doc.suppressAutoCompletion || doc.editor.suppressCompletion) return
+        // Undo/redo replays edits through the same callback; treating them as
+        // typing popped the completion list mid-undo (and its open popup then
+        // kept the keyboard from the caret).
+        if (doc.editor.lastChangeWasHistory) return
         val last = ops.lastOrNull() ?: return
         if (!last.insert || last.text.isEmpty()) return
         // Only single-character typing opens the popup: pasting or IME
@@ -430,10 +434,9 @@ class DocumentManager(
             }
         }
 
-        editor.onHover = { pos ->
-            doc.hoverActive = true
-            handleHover(doc, pos.line, pos.index)
-        }
+        // Hover documentation is requested and drawn by the editor binding
+        // (LspFeature.HOVER); the IDE no longer drives it.
+        editor.onHover = { _ -> }
         editor.onHoverEnd = {
             // Do not drop the text here: the hover popup keeps it alive
             // while the pointer rests on the popup itself. WorkspaceWindow
@@ -443,6 +446,10 @@ class DocumentManager(
         }
 
         editor.onCodeLensClick = { lens -> onCodeLensClicked(doc, lens) }
+
+        // Breakpoints belong to the editor (the gutter toggles them); the
+        // host forwards the change to a running debug session.
+        editor.onBreakpointsChange = { onBreakpointsChanged?.invoke(doc) }
 
         // While the completion popup is open, arrows/Enter/Tab belong to it.
         editor.keysReservedByOverlay = { doc.completionActive }
@@ -468,6 +475,9 @@ class DocumentManager(
         }
     }
 
+    /** Host hook: the editor's breakpoints changed (gutter click, F9). */
+    var onBreakpointsChanged: ((Document) -> Unit)? = null
+
     /** Host hook: open the references panel for [doc] (context menu). */
     var onFindReferences: ((Document) -> Unit)? = null
 
@@ -492,29 +502,59 @@ class DocumentManager(
         onExecuteCommand?.invoke(doc, command)
     }
 
-    private fun handleHover(doc: Document, line: Int, index: Int) {
-        val key = "$line:$index"
-        if (doc.hoverCache.containsKey(key)) {
-            val cached = doc.hoverCache[key]
-            doc.hoverPosKey = key
-            doc.hoverText = cached
-            doc.hoverLoading = false
-            return
+    // ==================== LSP data (symbols / code lenses) ====================
+
+    /**
+     * The editor-side LSP binding for [doc], created on demand. The server
+     * connection is owned by the IDE (process + initialize), so the editor
+     * only wires its features onto the running client.
+     */
+    fun lspEditorFor(doc: Document): cn.enaium.lsp.edit.lsp.LspEditor? {
+        doc.lspEditor?.let { return it }
+        val client = lsp.runningClientFor(doc)?.lspClient ?: return null
+        val created = cn.enaium.lsp.edit.lsp.LspEditor(
+            editor = doc.editor,
+            client = client,
+            uri = doc.uri,
+            languageId = doc.languageId,
+            // Migrated feature by feature; the IDE still serves the rest.
+            features = setOf(
+                cn.enaium.lsp.edit.lsp.LspFeature.CODE_ACTIONS,
+                cn.enaium.lsp.edit.lsp.LspFeature.HOVER,
+            ),
+        )
+        // Code actions from JetBrains-style servers carry a command
+        // (`applyModCommand`): running it makes the server send the actual
+        // edit back through workspace/applyEdit.
+        created.onExecuteCommand = { command, arguments ->
+            lsp.runningClientFor(doc)?.requestExecuteCommand(command, arguments) { }
         }
-        if (doc.hoverPosKey == key) return // request already in flight
-        doc.hoverPosKey = key
-        doc.hoverText = null
-        doc.hoverLoading = true
-        lsp.requestHover(doc, Position(line, index)) { text ->
-            if (doc.hoverPosKey == key) {
-                doc.hoverCache[key] = text
-                doc.hoverText = text
-                doc.hoverLoading = false
-            }
-        }
+        doc.lspEditor = created
+        scope.launch { created.start(initializeConnection = false) }
+        OutputLog.info("LSP", "editor bound: ${doc.path.substringAfterLast('/')} (code actions)")
+        return created
     }
 
-    // ==================== LSP data (symbols / code lenses) ====================
+    /**
+     * Drives the per-document LSP editors (call once per frame). The binding
+     * is created as soon as a server is running for the document — without it
+     * nothing handles Alt+Enter or reserves the keyboard during a rename.
+     */
+    /**
+     * Creates and flushes the LSP editors of the documents under [ownerDir].
+     *
+     * The window drawing a workspace is the only one that may touch its
+     * documents' editors: an LspEditor built while another window's ImGui
+     * context was current would draw into that other window's context.
+     */
+    fun drainLspEditors(ownerDir: String) {
+        for (path in docs.keys.toList()) {
+            if (!path.startsWith(ownerDir)) continue
+            val doc = docs[path] ?: continue
+            if (doc.lspEditor == null && lsp.runningClientFor(doc) != null) lspEditorFor(doc)
+            doc.lspEditor?.drain()
+        }
+    }
 
     /** Sets the document symbol tree (from the structure panel refresh). */
     fun setDocumentSymbols(doc: Document, symbols: List<DocumentSymbol>) {
@@ -608,6 +648,10 @@ class DocumentManager(
                 textTooltip = tooltip,
             )
         }
+        // The markers changed (or a fixed diagnostic went away) and the editor
+        // caches its rendered lines: without this the stale squiggles stay on
+        // screen after a code action fixed the code.
+        editor.invalidateAll()
     }
 
     /**

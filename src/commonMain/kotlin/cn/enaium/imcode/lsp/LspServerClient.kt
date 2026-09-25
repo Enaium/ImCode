@@ -116,7 +116,6 @@ class LspServerClient(
     fun activeProgress(): List<LspProgress> = activeProgress.values.toList()
 
     private var process: PlatformProcess? = null
-    private var launcher: JsonRpcLauncher? = null
     @Volatile
     private var closing = false
 
@@ -125,6 +124,14 @@ class LspServerClient(
 
     private val opened = HashSet<String>()           // uris this server has seen didOpen for
     private val docVersions = HashMap<String, Int>() // per-uri protocol version
+
+    /**
+     * Protocol client from lsp-edit: every request/notification below
+     * delegates to it. This class keeps the IDE-side concerns — process
+     * launch, logging, progress display and document bookkeeping.
+     */
+    @Volatile
+    private var client: cn.enaium.lsp.edit.lsp.LspClient? = null
 
     /** Trigger characters the server wants completion on, from initialize. */
     @Volatile
@@ -191,13 +198,13 @@ class LspServerClient(
         process = proc
 
         val transport = RpcLogTransport(proc.transport, config.name, rpcLoggingEnabled)
-        val l = JsonRpcLauncher(transport)
-        launcher = l
-        registerServerHandlers(l)
+        val c = cn.enaium.lsp.edit.lsp.LspClient(transport)
+        client = c
+        registerServerHandlers(c)
 
         scope.launch {
             try {
-                l.listen()
+                c.startListening()
             } catch (t: Throwable) {
                 if (!closing) OutputLog.warn(tag, "connection closed: ${t.message}")
             }
@@ -256,9 +263,16 @@ class LspServerClient(
             trace = "off",
         )
 
-        val result: InitializeResult = withTimeout(90_000) {
-            l.request("initialize", params, InitializeParams.serializer(), InitializeResult.serializer())
-        }
+        val result: InitializeResult = c.initialize(
+            processId = params.processId,
+            rootUri = params.rootUri,
+            rootPath = params.rootPath,
+            clientName = params.clientInfo?.name ?: "JetBrains Air",
+            clientVersion = params.clientInfo?.version,
+            capabilities = params.capabilities,
+            workspaceFolders = params.workspaceFolders,
+            trace = params.trace,
+        )
         capabilities = result.capabilities
         val caps = result.capabilities
         triggerCharacters = caps.completionProvider?.triggerCharacters?.toSet() ?: emptySet()
@@ -267,7 +281,7 @@ class LspServerClient(
         semanticLegend = caps.semanticTokensProvider?.legend
         semanticTokenTypes = caps.semanticTokensProvider?.legend?.tokenTypes ?: emptyList()
 
-        l.notify("initialized", InitializedParams(), InitializedParams.serializer())
+        c.notifyInitialized()
         state = State.RUNNING
         statusText = "running"
         OutputLog.info(
@@ -292,8 +306,8 @@ class LspServerClient(
         }
     }
 
-    private fun registerServerHandlers(l: JsonRpcLauncher) {
-        l.onNotification("window/logMessage", MessageParams.serializer()) { p ->
+    private fun registerServerHandlers(l: cn.enaium.lsp.edit.lsp.LspClient) {
+        l.onLogMessage { p ->
             val level = when (p.type) {
                 1 -> LogLevel.ERROR
                 2 -> LogLevel.WARN
@@ -301,7 +315,7 @@ class LspServerClient(
             }
             OutputLog.append(tag, level, p.message)
         }
-        l.onNotification("window/showMessage", MessageParams.serializer()) { p ->
+        l.onShowMessage { p ->
             val level = when (p.type) {
                 1 -> LogLevel.ERROR
                 2 -> LogLevel.WARN
@@ -309,17 +323,17 @@ class LspServerClient(
             }
             OutputLog.append(tag, level, "[showMessage] ${p.message}")
         }
-        l.onNotification("textDocument/publishDiagnostics", PublishDiagnosticsParams.serializer()) { p ->
+        l.onPublishDiagnostics { p ->
             val path = Uri.uriToPath(p.uri) ?: p.uri
             mailbox.post { onDiagnostics?.invoke(path, p.version, p.diagnostics) }
         }
-        l.onNotification("$/progress", ProgressParams.serializer()) { p ->
+        l.onProgress { p ->
             val token = when (val t = p.token) {
                 is Token.StringValue -> t.value
                 is Token.NumberValue -> t.value.toString()
-                null -> return@onNotification
+                null -> return@onProgress
             }
-            val value = (p.value as? ProgressValue.WorkDone)?.value ?: return@onNotification
+            val value = (p.value as? ProgressValue.WorkDone)?.value ?: return@onProgress
             mailbox.post {
                 when (value) {
                     is WorkDoneProgressNotificationValue.Begin -> activeProgress[token] =
@@ -338,37 +352,26 @@ class LspServerClient(
                 }
             }
         }
-        // The server asks permission before reporting work-done progress;
-        // acknowledging with a null response is all the client must do.
-        l.onRequestJson("window/workDoneProgress/create", JsonElement.serializer()) { _ -> JsonNull }
-        // Servers request settings (e.g. inlay-hint toggles) before serving
-        // configuration-dependent requests; answering "null per item" keeps
-        // the defaults. Without this handler the server sees
-        // "Method not found: workspace/configuration" and the whole request
-        // (inlayHint) fails.
-        l.onRequestJson("workspace/configuration", JsonElement.serializer()) { params ->
-            // null per requested section: the server applies its defaults.
-            // (Its full settings schema is not published; guessing keys had
-            // no effect on inlay-hint output.)
-            val count = (params as? JsonObject)?.get("items").let { it as? JsonArray }?.size ?: 0
-            JsonArray(List(count) { JsonNull })
-        }
         // JetBrains-style servers report build/import progress through this
         // custom notification instead of $/progress; surface it in the LSP
         // output tab so long imports are not silent.
-        l.onNotification("intellij/importLog", JsonElement.serializer()) { el ->
+        l.onCustomNotification("intellij/importLog") { el ->
             val message = (el as? kotlinx.serialization.json.JsonObject)
                 ?.get("message")?.toString()?.trim('"')
             if (!message.isNullOrBlank()) {
                 OutputLog.append(tag, LogLevel.SERVER, message.trim())
             }
         }
-        l.onNotification("telemetry/event") { /* ignored */ }
-        l.onRequestJson("workspace/applyEdit", cn.enaium.lsp.model.WorkspaceEdit.serializer()) { edit ->
+        l.onCustomNotification("telemetry/event") { /* ignored */ }
+        // Server-initiated edits are applied by the host.
+        l.onApplyEdit = { edit ->
             mailbox.post { onApplyEdit?.invoke(edit) }
-            JsonNull
+            true
         }
     }
+
+    /** The protocol client (lsp-edit); hosts bind editors to it. */
+    val lspClient: cn.enaium.lsp.edit.lsp.LspClient? get() = client
 
     /** Diagnostics sink and workspace-edit sink, provided by the app (called on render thread). */
     var onDiagnostics: ((path: String, version: Int?, diagnostics: List<Diagnostic>) -> Unit)? = null
@@ -384,14 +387,11 @@ class LspServerClient(
         statusText = "stopping"
         closing = true
         scope.launch(io) {
-            val l = launcher
             try {
-                if (l != null) {
-                    withTimeoutOrNull(3000) {
-                        l.request("shutdown", null, JsonElement.serializer(), JsonElement.serializer())
-                    }
-                    l.notify("exit", JsonNull)
+                withTimeoutOrNull(3000) {
+                    client?.shutdown()
                 }
+                client?.exit()
             } catch (_: Throwable) {
             }
             destroyProcess()
@@ -437,17 +437,12 @@ class LspServerClient(
     fun didOpen(doc: Document) {
         if (!isRunning && state != State.STARTING) return
         scope.launch(io) {
-            val l = launcher ?: return@launch
             val uri = doc.uri
             if (uri in opened) return@launch
             opened.add(uri)
             docVersions[uri] = 1
             try {
-                l.notify(
-                    "textDocument/didOpen",
-                    DidOpenTextDocumentParams(TextDocumentItem(uri, languageIdFor(doc), 1, doc.text())),
-                    DidOpenTextDocumentParams.serializer(),
-                )
+                client?.didOpen(uri, languageIdFor(doc), 1, doc.text())
             } catch (t: Throwable) {
                 OutputLog.warn(tag, "didOpen failed: ${t.message}")
             }
@@ -462,7 +457,6 @@ class LspServerClient(
     fun didChangeIncremental(doc: Document, ops: List<EditOp>) {
         if (!isRunning) return
         scope.launch(io) {
-            val l = launcher ?: return@launch
             val uri = doc.uri
             if (uri !in opened) return@launch
             val version = (docVersions[uri] ?: 1) + 1
@@ -485,14 +479,7 @@ class LspServerClient(
             }
             if (events.isEmpty()) return@launch
             try {
-                l.notify(
-                    "textDocument/didChange",
-                    DidChangeTextDocumentParams(
-                        VersionedTextDocumentIdentifier(uri, version),
-                        events,
-                    ),
-                    DidChangeTextDocumentParams.serializer(),
-                )
+                client?.didChange(uri, version, events)
             } catch (t: Throwable) {
                 OutputLog.warn(tag, "didChange failed: ${t.message}")
             }
@@ -501,16 +488,11 @@ class LspServerClient(
 
     fun didClose(path: String, uri: String) {
         scope.launch(io) {
-            val l = launcher ?: return@launch
             if (uri !in opened) return@launch
             opened.remove(uri)
             docVersions.remove(uri)
             try {
-                l.notify(
-                    "textDocument/didClose",
-                    DidCloseTextDocumentParams(TextDocumentIdentifier(uri)),
-                    DidCloseTextDocumentParams.serializer(),
-                )
+                client?.didClose(uri)
             } catch (_: Throwable) {
             }
         }
@@ -519,13 +501,8 @@ class LspServerClient(
     fun didSave(doc: Document, text: String) {
         if (!isRunning) return
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                l.notify(
-                    "textDocument/didSave",
-                    DidSaveTextDocumentParams(TextDocumentIdentifier(doc.uri), if (saveIncludeText) text else null),
-                    DidSaveTextDocumentParams.serializer(),
-                )
+                client?.didSave(doc.uri, if (saveIncludeText) text else null)
             } catch (_: Throwable) {
             }
         }
@@ -543,25 +520,12 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val result = withTimeout(5000) {
-                    l.request(
-                        "textDocument/completion",
-                        CompletionParams(
-                            textDocument = TextDocumentIdentifier(doc.uri),
-                            position = position,
-                            context = triggerChar?.let {
-                                CompletionContext(CompletionTriggerKind.TriggerCharacter, it)
-                            } ?: CompletionContext(CompletionTriggerKind.Invoked),
-                        ),
-                        CompletionParams.serializer(),
-                        CompletionResult.serializer(),
-                    )
-                }
+                val result = client?.completion(doc.uri, position)
                 val items = when (result) {
                     is CompletionResult.Items -> result.value
                     is CompletionResult.ListValue -> result.value.items
+                    else -> emptyList()
                 }
                 mailbox.post { onResult(items) }
             } catch (_: Throwable) {
@@ -577,23 +541,13 @@ class LspServerClient(
      */
     fun requestCompletionResolve(item: cn.enaium.lsp.model.CompletionItem, onResult: (cn.enaium.lsp.model.CompletionItem?) -> Unit) {
         if (!isRunning) {
-            // MUST complete: the accept flow applies the completion in the
-            // callback (a bare return stranded the insertion entirely).
             mailbox.post { onResult(null) }
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val resolved = withTimeout(5000) {
-                    l.request(
-                        "completionItem/resolve",
-                        item,
-                        cn.enaium.lsp.model.CompletionItem.serializer(),
-                        cn.enaium.lsp.model.CompletionItem.serializer(),
-                    )
-                }
-                mailbox.post { onResult(resolved) }
+                val result = client?.completionResolve(item)
+                mailbox.post { onResult(result) }
             } catch (_: Throwable) {
                 mailbox.post { onResult(null) }
             }
@@ -607,11 +561,8 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val hover: Hover? = withTimeout(5000) {
-                    l.request("textDocument/hover", HoverParams(TextDocumentIdentifier(doc.uri), position), HoverParams.serializer(), Hover.serializer())
-                }
+                val hover = client?.hover(doc.uri, position)
                 mailbox.post { onResult(hover?.contents?.let(::hoverText)) }
             } catch (_: Throwable) {
                 mailbox.post { onResult(null) }
@@ -648,21 +599,14 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val result: LocationResult = withTimeout(5000) {
-                    l.request(
-                        "textDocument/definition",
-                        DefinitionParams(TextDocumentIdentifier(doc.uri), position),
-                        DefinitionParams.serializer(),
-                        LocationResult.serializer(),
-                    )
-                }
+                val result = client?.definition(doc.uri, position)
                 val loc = when (result) {
                     is LocationResult.Locations -> result.value.firstOrNull()
                     is LocationResult.Links -> result.value.firstOrNull()?.let { link ->
                         Location(link.targetUri, link.targetSelectionRange)
                     }
+                    else -> null
                 }
                 mailbox.post { onResult(loc) }
             } catch (_: Throwable) {
@@ -686,17 +630,9 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val result = withTimeout(8000) {
-                    l.request(
-                        "workspace/executeCommand",
-                        cn.enaium.lsp.model.ExecuteCommandParams(command = command, arguments = arguments),
-                        cn.enaium.lsp.model.ExecuteCommandParams.serializer(),
-                        JsonElement.serializer(),
-                    )
-                }
-                mailbox.post { onResult(result) }
+                client?.executeCommand(command, arguments)
+                mailbox.post { onResult(null) }
             } catch (_: Throwable) {
                 mailbox.post { onResult(null) }
             }
@@ -710,17 +646,9 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val tokens: cn.enaium.lsp.model.SemanticTokens = withTimeout(8000) {
-                    l.request(
-                        "textDocument/semanticTokens/full",
-                        cn.enaium.lsp.model.SemanticTokensParams(textDocument = cn.enaium.lsp.model.TextDocumentIdentifier(doc.uri)),
-                        cn.enaium.lsp.model.SemanticTokensParams.serializer(),
-                        cn.enaium.lsp.model.SemanticTokens.serializer(),
-                    )
-                }
-                mailbox.post { onResult(tokens) }
+                val result = client?.semanticTokensFull(doc.uri)
+                mailbox.post { onResult(result) }
             } catch (_: Throwable) {
                 mailbox.post { onResult(null) }
             }
@@ -736,36 +664,8 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                // The response is an ARRAY of DocumentSymbol (hierarchical)
-                // or SymbolInformation (flat) elements; DocumentSymbolResult
-                // is a single element, so the full list serializer is
-                // required here — parsing one element fails on the array.
-                val result: List<cn.enaium.lsp.model.DocumentSymbolResult> = withTimeout(8000) {
-                    l.request(
-                        "textDocument/documentSymbol",
-                        cn.enaium.lsp.model.DocumentSymbolParams(textDocument = cn.enaium.lsp.model.TextDocumentIdentifier(doc.uri)),
-                        cn.enaium.lsp.model.DocumentSymbolParams.serializer(),
-                        kotlinx.serialization.builtins.ListSerializer(cn.enaium.lsp.model.DocumentSymbolResult.serializer()),
-                    )
-                }
-                val symbols = result.map { element ->
-                    when (element) {
-                        is cn.enaium.lsp.model.DocumentSymbolResult.Symbol -> element.value
-                        // Flat SymbolInformation carries no children or
-                        // selection range; map it onto the tree model so the
-                        // structure pane can still list and navigate it.
-                        is cn.enaium.lsp.model.DocumentSymbolResult.SymbolInfo ->
-                            cn.enaium.lsp.model.DocumentSymbol(
-                                name = element.value.name,
-                                kind = element.value.kind,
-                                range = element.value.location.range,
-                                selectionRange = element.value.location.range,
-                                detail = element.value.containerName,
-                            )
-                    }
-                }
+                val symbols = client?.documentSymbols(doc.uri) ?: emptyList()
                 mailbox.post {
                     OutputLog.append("LSP", LogLevel.LSP, "documentSymbol: ${symbols.size} symbol(s)")
                     onResult(symbols)
@@ -795,20 +695,8 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val actions: List<cn.enaium.lsp.model.CodeAction> = withTimeout(8000) {
-                    l.request(
-                        "textDocument/codeAction",
-                        cn.enaium.lsp.model.CodeActionParams(
-                            textDocument = cn.enaium.lsp.model.TextDocumentIdentifier(doc.uri),
-                            range = range,
-                            context = cn.enaium.lsp.model.CodeActionContext(diagnostics = diagnostics),
-                        ),
-                        cn.enaium.lsp.model.CodeActionParams.serializer(),
-                        kotlinx.serialization.builtins.ListSerializer(cn.enaium.lsp.model.CodeAction.serializer()),
-                    )
-                }
+                val actions = client?.codeAction(doc.uri, range, diagnostics) ?: emptyList()
                 mailbox.post {
                     OutputLog.append("LSP", LogLevel.LSP, "codeAction: ${actions.size} action(s)")
                     onResult(actions)
@@ -829,17 +717,9 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val resolved: cn.enaium.lsp.model.CodeAction = withTimeout(5000) {
-                    l.request(
-                        "codeAction/resolve",
-                        action,
-                        cn.enaium.lsp.model.CodeAction.serializer(),
-                        cn.enaium.lsp.model.CodeAction.serializer(),
-                    )
-                }
-                mailbox.post { onResult(resolved) }
+                val result = client?.codeActionResolve(action)
+                mailbox.post { onResult(result) }
             } catch (_: Throwable) {
                 mailbox.post { onResult(null) }
             }
@@ -853,33 +733,18 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val hints: List<cn.enaium.lsp.model.InlayHint> = withTimeout(8000) {
-                    l.request(
-                        "textDocument/inlayHint",
-                        cn.enaium.lsp.model.InlayHintParams(
-                            textDocument = cn.enaium.lsp.model.TextDocumentIdentifier(doc.uri),
-                            // Whole document, clamped to a real line count:
-                            // some servers reject/ignore Int.MAX_VALUE ranges.
-                            range = cn.enaium.lsp.model.Range(
-                                cn.enaium.lsp.model.Position(0, 0),
-                                cn.enaium.lsp.model.Position(doc.editor.buffer.lineCount() + 1, 0),
-                            ),
-                        ),
-                        cn.enaium.lsp.model.InlayHintParams.serializer(),
-                        kotlinx.serialization.builtins.ListSerializer(cn.enaium.lsp.model.InlayHint.serializer()),
-                    )
-                }
-                mailbox.post {
-                    OutputLog.append("LSP", LogLevel.LSP, "inlayHint: ${hints.size} hint(s)")
-                    onResult(hints)
-                }
-            } catch (t: Throwable) {
-                mailbox.post {
-                    OutputLog.append("LSP", LogLevel.LSP, "inlayHint failed: ${t.message}")
-                    onResult(emptyList())
-                }
+                val end = cn.enaium.lsp.model.Position(
+                    doc.editor.buffer.lineCount(),
+                    0,
+                )
+                val hints = client?.inlayHint(
+                    doc.uri,
+                    cn.enaium.lsp.model.Range(cn.enaium.lsp.model.Position(0, 0), end),
+                ) ?: emptyList()
+                mailbox.post { onResult(hints) }
+            } catch (_: Throwable) {
+                mailbox.post { onResult(emptyList()) }
             }
         }
     }
@@ -891,17 +756,9 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val lenses: List<cn.enaium.lsp.model.CodeLens> = withTimeout(8000) {
-                    l.request(
-                        "textDocument/codeLens",
-                        cn.enaium.lsp.model.CodeLensParams(cn.enaium.lsp.model.TextDocumentIdentifier(doc.uri)),
-                        cn.enaium.lsp.model.CodeLensParams.serializer(),
-                        kotlinx.serialization.builtins.ListSerializer(cn.enaium.lsp.model.CodeLens.serializer()),
-                    )
-                }
-                mailbox.post { onResult(lenses) }
+                val result = client?.codeLens(doc.uri) ?: emptyList()
+                mailbox.post { onResult(result) }
             } catch (_: Throwable) {
                 mailbox.post { onResult(emptyList()) }
             }
@@ -915,17 +772,9 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val ranges: List<cn.enaium.lsp.model.FoldingRange> = withTimeout(8000) {
-                    l.request(
-                        "textDocument/foldingRange",
-                        cn.enaium.lsp.model.FoldingRangeRequestParams(cn.enaium.lsp.model.TextDocumentIdentifier(doc.uri)),
-                        cn.enaium.lsp.model.FoldingRangeRequestParams.serializer(),
-                        kotlinx.serialization.builtins.ListSerializer(cn.enaium.lsp.model.FoldingRange.serializer()),
-                    )
-                }
-                mailbox.post { onResult(ranges) }
+                val result = client?.foldingRange(doc.uri) ?: emptyList()
+                mailbox.post { onResult(result) }
             } catch (_: Throwable) {
                 mailbox.post { onResult(emptyList()) }
             }
@@ -934,14 +783,14 @@ class LspServerClient(
 
     /** codeLens/resolve: fills the command of a lens. */
     fun requestCodeLensResolve(lens: cn.enaium.lsp.model.CodeLens, onResult: (cn.enaium.lsp.model.CodeLens?) -> Unit) {
-        if (!isRunning) return
+        if (!isRunning) {
+            mailbox.post { onResult(null) }
+            return
+        }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val resolved: cn.enaium.lsp.model.CodeLens = withTimeout(5000) {
-                    l.request("codeLens/resolve", lens, cn.enaium.lsp.model.CodeLens.serializer(), cn.enaium.lsp.model.CodeLens.serializer())
-                }
-                mailbox.post { onResult(resolved) }
+                val result = client?.codeLensResolve(lens)
+                mailbox.post { onResult(result) }
             } catch (_: Throwable) {
                 mailbox.post { onResult(null) }
             }
@@ -955,28 +804,9 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val result: cn.enaium.lsp.model.WorkspaceSymbolResult = withTimeout(8000) {
-                    l.request(
-                        "workspace/symbol",
-                        cn.enaium.lsp.model.WorkspaceSymbolParams(query = query),
-                        cn.enaium.lsp.model.WorkspaceSymbolParams.serializer(),
-                        cn.enaium.lsp.model.WorkspaceSymbolResult.serializer(),
-                    )
-                }
-                val symbols = when (result) {
-                    is cn.enaium.lsp.model.WorkspaceSymbolResult.Symbols -> result.value
-                    is cn.enaium.lsp.model.WorkspaceSymbolResult.SymbolInfos -> result.value.map {
-                        cn.enaium.lsp.model.WorkspaceSymbol(
-                            name = it.name,
-                            kind = it.kind,
-                            location = cn.enaium.lsp.model.SymbolLocation.LocationValue(it.location),
-                            containerName = it.containerName,
-                        )
-                    }
-                }
-                mailbox.post { onResult(symbols) }
+                val result = client?.workspaceSymbols(query) ?: emptyList()
+                mailbox.post { onResult(result) }
             } catch (_: Throwable) {
                 mailbox.post { onResult(emptyList()) }
             }
@@ -992,21 +822,9 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val refs: List<Location> = withTimeout(8000) {
-                    l.request(
-                        "textDocument/references",
-                        cn.enaium.lsp.model.ReferenceParams(
-                            textDocument = cn.enaium.lsp.model.TextDocumentIdentifier(doc.uri),
-                            position = position,
-                            context = cn.enaium.lsp.model.ReferenceContext(includeDeclaration = true),
-                        ),
-                        cn.enaium.lsp.model.ReferenceParams.serializer(),
-                        kotlinx.serialization.builtins.ListSerializer(Location.serializer()),
-                    )
-                }
-                mailbox.post { onResult(refs) }
+                val result = client?.references(doc.uri, position) ?: emptyList()
+                mailbox.post { onResult(result) }
             } catch (_: Throwable) {
                 mailbox.post { onResult(emptyList()) }
             }
@@ -1020,21 +838,9 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val edit: cn.enaium.lsp.model.WorkspaceEdit = withTimeout(8000) {
-                    l.request(
-                        "textDocument/rename",
-                        cn.enaium.lsp.model.RenameParams(
-                            textDocument = cn.enaium.lsp.model.TextDocumentIdentifier(doc.uri),
-                            position = position,
-                            newName = newName,
-                        ),
-                        cn.enaium.lsp.model.RenameParams.serializer(),
-                        cn.enaium.lsp.model.WorkspaceEdit.serializer(),
-                    )
-                }
-                mailbox.post { onResult(edit) }
+                val result = client?.rename(doc.uri, position, newName)
+                mailbox.post { onResult(result) }
             } catch (_: Throwable) {
                 mailbox.post { onResult(null) }
             }
@@ -1048,20 +854,9 @@ class LspServerClient(
             return
         }
         scope.launch(io) {
-            val l = launcher ?: return@launch
             try {
-                val help: cn.enaium.lsp.model.SignatureHelp = withTimeout(5000) {
-                    l.request(
-                        "textDocument/signatureHelp",
-                        cn.enaium.lsp.model.SignatureHelpParams(
-                            textDocument = cn.enaium.lsp.model.TextDocumentIdentifier(doc.uri),
-                            position = position,
-                        ),
-                        cn.enaium.lsp.model.SignatureHelpParams.serializer(),
-                        cn.enaium.lsp.model.SignatureHelp.serializer(),
-                    )
-                }
-                mailbox.post { onResult(help) }
+                val result = client?.signatureHelp(doc.uri, position)
+                mailbox.post { onResult(result) }
             } catch (_: Throwable) {
                 mailbox.post { onResult(null) }
             }

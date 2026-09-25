@@ -4,6 +4,7 @@ import cn.enaium.imgui.ImGui
 import cn.enaium.imcode.app.AppCore
 import cn.enaium.imcode.config.KeyAction
 import cn.enaium.imcode.editor.Document
+import cn.enaium.imcode.platform.ioFile
 
 /**
  * The application menu bar. Drawn by the hub window (ws = null) and by every
@@ -19,6 +20,18 @@ fun drawMenuBar(core: AppCore, ws: WorkspaceWindow?) {
         }
         if (ImGui.menuItem("Open File...", shortcutFor(core, KeyAction.OPEN_FILE))) core.requestOpenFile(ws)
         if (ImGui.menuItem("Open Folder...", shortcutFor(core, KeyAction.OPEN_FOLDER))) core.requestOpenFolder()
+        if (ImGui.beginMenu("Open Recent Folder", core.config.recentFolders.isNotEmpty())) {
+            for (entry in core.config.recentFolders.take(10)) {
+                val name = ioFile(entry.path).name.ifEmpty { entry.path }
+                if (ImGui.menuItem("$name  (${entry.path})##recent-folder-${entry.path}")) core.openFolder(entry.path)
+            }
+            ImGui.separator()
+            if (ImGui.menuItem("Clear Recent Folders")) {
+                core.updateConfig(core.config.copy(recentFolders = emptyList()))
+                core.saveState()
+            }
+            ImGui.endMenu()
+        }
         ImGui.separator()
         if (ImGui.menuItem("Save", shortcutFor(core, KeyAction.SAVE), false, doc != null)) doc?.let { core.documents.save(it) }
         if (ImGui.menuItem("Save All", "", false, core.documents.openDocs.any { it.dirty })) core.documents.saveAll()
@@ -55,6 +68,11 @@ fun drawMenuBar(core: AppCore, ws: WorkspaceWindow?) {
         if (ImGui.menuItem("Find Symbol...")) {
             core.showSymbolSearch = true
         }
+        ImGui.separator()
+        if (ImGui.menuItem("Go to Line...", shortcutFor(core, KeyAction.GOTO_LINE))) {
+            GotoLineWindow.reset()
+            core.showGotoLine = true
+        }
         ImGui.endMenu()
     }
     if (ImGui.beginMenu("View")) {
@@ -65,6 +83,41 @@ fun drawMenuBar(core: AppCore, ws: WorkspaceWindow?) {
         if (ImGui.menuItem("Reset Font Size", shortcutFor(core, KeyAction.FONT_RESET))) core.adjustFontTo(13f)
         ImGui.separator()
         if (ImGui.menuItem("Welcome Screen", shortcutFor(core, KeyAction.WELCOME))) core.showWelcome = true
+        ImGui.endMenu()
+    }
+    if (ImGui.beginMenu("Run")) {
+        val debug = core.debug
+        val canStart = core.debug.canDebug(doc)
+        if (ImGui.menuItem("Start / Continue", shortcutFor(core, KeyAction.DEBUG_START), false, canStart || debug.paused)) {
+            runAction(core, KeyAction.DEBUG_START, ws, doc)
+        }
+        if (ImGui.menuItem("Pause", shortcutFor(core, KeyAction.DEBUG_PAUSE), false, debug.running)) {
+            runAction(core, KeyAction.DEBUG_PAUSE, ws, doc)
+        }
+        ImGui.separator()
+        val stopped = debug.paused
+        if (ImGui.menuItem("Step Over", shortcutFor(core, KeyAction.DEBUG_STEP_OVER), false, stopped)) {
+            debug.stepOver()
+        }
+        if (ImGui.menuItem("Step Into", shortcutFor(core, KeyAction.DEBUG_STEP_INTO), false, stopped)) {
+            debug.stepInto()
+        }
+        if (ImGui.menuItem("Step Out", shortcutFor(core, KeyAction.DEBUG_STEP_OUT), false, stopped)) {
+            debug.stepOut()
+        }
+        ImGui.separator()
+        if (ImGui.menuItem("Restart", shortcutFor(core, KeyAction.DEBUG_RESTART), false, debug.active)) {
+            debug.restart()
+        }
+        if (ImGui.menuItem("Stop", shortcutFor(core, KeyAction.DEBUG_STOP), false, debug.active)) {
+            debug.stop()
+        }
+        ImGui.separator()
+        if (ImGui.menuItem("Toggle Breakpoint", "F9", false, doc != null)) {
+            doc?.editor?.let { editor ->
+                editor.toggleBreakpoint(editor.cursor.line)
+            }
+        }
         ImGui.endMenu()
     }
     if (ImGui.beginMenu("Workspace")) {
@@ -136,6 +189,10 @@ internal fun runAction(core: AppCore, action: String, ws: WorkspaceWindow?, doc:
         KeyAction.SAVE_ALL -> core.documents.saveAll()
         KeyAction.CLOSE_TAB -> ws?.activeFile?.let { path -> if (core.documents.isOpen(path)) ws.requestClose(path) }
         KeyAction.FIND_FILES -> core.showSearch = true
+        KeyAction.GOTO_LINE -> {
+            GotoLineWindow.reset()
+            core.showGotoLine = true
+        }
         KeyAction.RECENT_FILES -> core.showWelcome = true
         KeyAction.SETTINGS -> core.showSettings = true
         KeyAction.FONT_UP -> core.adjustFont(+0.5f)
@@ -143,6 +200,21 @@ internal fun runAction(core: AppCore, action: String, ws: WorkspaceWindow?, doc:
         KeyAction.FONT_RESET -> core.adjustFontTo(13f)
         KeyAction.NEW_WORKSPACE -> core.requestOpenFolder()
         KeyAction.WELCOME -> core.showWelcome = true
-        KeyAction.QUICK_FIX -> if (doc != null) ws?.openCodeActions(core)
+        KeyAction.DEBUG_START -> {
+            if (doc == null) {
+                // Nothing to debug; say so instead of failing silently.
+                core.debug.status = "open a file to debug"
+            } else if (core.debug.active) {
+                core.debug.continueOrPause()
+            } else {
+                core.debug.start(doc)
+            }
+        }
+        KeyAction.DEBUG_PAUSE -> if (core.debug.running) core.debug.continueOrPause()
+        KeyAction.DEBUG_STEP_OVER -> core.debug.stepOver()
+        KeyAction.DEBUG_STEP_INTO -> core.debug.stepInto()
+        KeyAction.DEBUG_STEP_OUT -> core.debug.stepOut()
+        KeyAction.DEBUG_RESTART -> core.debug.restart()
+        KeyAction.DEBUG_STOP -> core.debug.stop()
     }
 }

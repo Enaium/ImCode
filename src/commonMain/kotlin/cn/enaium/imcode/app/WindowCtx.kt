@@ -1,14 +1,17 @@
 package cn.enaium.imcode.app
 
-import cn.enaium.imgui.ImFontConfig
 import cn.enaium.imgui.ImGui
 import cn.enaium.imgui.ImGuiConfigFlags
-import cn.enaium.imgui.ImGuiPopupFlags
 import cn.enaium.imgui.backends.sdl.ImGuiSdlBackend
 import cn.enaium.imgui.backends.sdl.ImGuiSdlRendererBackend
+import cn.enaium.imcode.app.OutputLog
+import cn.enaium.imcode.config.Config
 import cn.enaium.imcode.ui.HubView
+import cn.enaium.imcode.ui.NotificationView
 import cn.enaium.imcode.ui.WorkspaceWindow
 import cn.enaium.imcode.ui.processWindowShortcuts
+import cn.enaium.lsp.edit.EditorFontSettings
+import cn.enaium.lsp.edit.installEditorFonts
 import cn.enaium.sdl.SDL
 import cn.enaium.sdl.SDLColor
 import cn.enaium.sdl.SDLWindow
@@ -41,12 +44,15 @@ class WindowCtx(
     )
     private val renderer = SDL.createRenderer(window)
     private val context = ImGui.createContext()
-    val imgui: ImGuiSdlBackend = ImGuiSdlBackend(window)
-    private val backend = ImGuiSdlRendererBackend(renderer)
-    private val hub: HubView = HubView(core, this)
+    val imgui: ImGuiSdlBackend
+    private val backend: ImGuiSdlRendererBackend
+    private val hub: HubView
 
     /** Highest framebuffer scale; used to keep text crisp on Retina. */
     val density: Float
+
+    /** Size the atlas was rasterized at; [applyFontScale] scales relative to it. */
+    private var bakedFontSizePx = 0f
 
     /** Set when this window may be torn down after the current frame. */
     @Volatile
@@ -58,14 +64,35 @@ class WindowCtx(
     val kind: WindowKind get() = if (workspace != null) WindowKind.WORKSPACE else WindowKind.HUB
 
     init {
+        // A context is process-global state and creating one does not make it
+        // current (ImGui restores the previous one), so this window must select
+        // its own before touching anything. Without this the second window
+        // built the *first* window's already-built font atlas — which crashes
+        // in ImFontAtlas::Build — and drew into the wrong context.
+        //
+        // The backends are built only after that, because they capture
+        // ImGui.getIO() in their constructor: built earlier they captured the
+        // previous window's IO, and the SDL backend's init() then assigned
+        // configFlags (a plain assignment of NAV_ENABLE_KEYBOARD) into that
+        // other window. That wiped the other window's DOCKING_ENABLE, which
+        // makes DockSpace a no-op and leaves the window showing nothing but
+        // its menu bar. The context is put back before returning for the same
+        // reason: a window must not leave a foreign context current while the
+        // caller keeps setting windows up.
+        val previous = ImGui.getCurrentContext()
+        ImGui.setCurrentContext(context)
+        imgui = ImGuiSdlBackend(window)
+        backend = ImGuiSdlRendererBackend(renderer)
+        hub = HubView(core, this)
         imgui.init()
         density = maxOf(imgui.framebufferScale.x, imgui.framebufferScale.y, 1f)
         val io = ImGui.getIO()
         // window layout is persisted in ~/.imcode/config.json, not imgui.ini
         io.iniFilename = null
         io.configFlags = io.configFlags or ImGuiConfigFlags.NAV_ENABLE_KEYBOARD or ImGuiConfigFlags.DOCKING_ENABLE
-        applyFont(core.config.fontSize)
+        applyFont(core.config)
         workspace?.let { adopt(it) }
+        if (previous != null) ImGui.setCurrentContext(previous)
     }
 
     /** Turns this window into the host of [ws] (updates the title). */
@@ -80,26 +107,71 @@ class WindowCtx(
         window.title = "ImCode"
     }
 
-    fun applyFont(sizePx: Float) {
+    fun applyFont(cfg: Config) {
         val fonts = ImGui.getIO().fonts
-        fonts.addFontDefault(ImFontConfig(sizePixels = sizePx * density, rasterizerDensity = density))
+        installEditorFonts(
+            EditorFontSettings(
+                mainFontPath = cfg.mainFontPath.ifBlank { null },
+                fallbackFontPath = cfg.fallbackFontPath.ifBlank { null },
+                sizePx = cfg.fontSize,
+            ),
+            density = density,
+        )
         check(fonts.build()) { "font atlas build failed" }
         val tex = fonts.getTexDataAsRGBA32()
         val texId = backend.uploadFontTexture(tex.pixels, tex.width, tex.height)
         fonts.setTexID(texId)
+        bakedFontSizePx = cfg.fontSize
+        OutputLog.info(
+            "App",
+            "fonts: main=${cfg.mainFontPath.ifBlank { "built-in" }}, " +
+                "fallback=${cfg.fallbackFontPath.ifBlank { "none" }}, size=${cfg.fontSize}",
+        )
+    }
+
+    /**
+     * Applies a font-size change by scaling the baked atlas.
+     *
+     * Re-rasterizing would need a face to join an atlas that is already built
+     * (and there is no way to clear one), so the glyphs stay as they were baked
+     * until ImCode restarts — which re-bakes them crisply at the new size. The
+     * layout follows immediately either way.
+     */
+    fun applyFontScale(sizePx: Float) {
+        if (bakedFontSizePx <= 0f) return
+        ImGui.getIO().fontGlobalScale = sizePx / bakedFontSizePx
+    }
+
+    /** Runs [body] with this window's ImGui context current. */
+    fun withContext(body: () -> Unit) {
+        val previous = ImGui.getCurrentContext()
+        ImGui.setCurrentContext(context)
+        body()
+        if (previous != null) ImGui.setCurrentContext(previous)
     }
 
     /** Draws one frame for this window. */
     fun renderFrame() {
-        if (core.fontDirty) applyFont(core.config.fontSize)
+        // Windows render one after another, each with its own context: select
+        // it before drawing, or this frame lands in another window's context.
+        ImGui.setCurrentContext(context)
+        // Anything this frame opens (settings, search, dialogs) belongs to
+        // this window, so it is drawn here and not over another project.
+        core.currentWindowId = windowId
+        if (core.fontDirty) applyFontScale(core.config.fontSize)
         // ImGui's keyboard navigation must stay off while the editor owns
         // the keyboard: otherwise arrow keys move the nav focus across the
         // tab bar/panes and scroll the view while the user is moving the
         // caret or picking a completion item. The editor/popup read the
         // keys themselves.
         val activeDoc = workspace?.activeFile?.let { core.documents.get(it) }
-        val editorOwnsKeys = activeDoc?.editor?.isFocusedStrict == true ||
-            activeDoc?.completionActive == true
+        // The IDE's own text fields (search, settings, symbol search) own the
+        // keyboard while they are open: the editor must not act on keys then,
+        // otherwise Backspace in a search box also deletes document text.
+        val hostFieldFocused = core.hostFieldFocused || (workspace?.newFilePromptOpen == true)
+        activeDoc?.editor?.keyboardOwnedByHost = hostFieldFocused
+        val editorOwnsKeys = !hostFieldFocused && (activeDoc?.editor?.isFocusedStrict == true ||
+            activeDoc?.completionActive == true)
         val io = ImGui.getIO()
         io.configFlags = if (editorOwnsKeys) {
             io.configFlags and ImGuiConfigFlags.NAV_ENABLE_KEYBOARD.inv()
@@ -122,18 +194,25 @@ class WindowCtx(
             core.typeTestCounter++
         }
 
-        // window-local shortcuts (skip while popups/dialogs need the keys)
+        // Window-local shortcuts. Only the file dialog takes them away: an
+        // ANY_POPUP check also matched the editor's own popups (code actions,
+        // completion, context menu), which silently disabled Cmd+S and every
+        // other shortcut whenever one was open.
         val fileDialogOpen = core.fileDialogs.isOpen
-        val modalOpen = ImGui.isPopupOpen("", ImGuiPopupFlags.ANY_POPUP)
-        if (!fileDialogOpen && !modalOpen) {
+        if (!fileDialogOpen) {
             processWindowShortcuts(core, workspace)
         }
 
         val ws = workspace
         if (ws != null) {
             ws.draw(core)
-            // primary window alone hosts the auxiliary UI above the workspace
-            if (isPrimary) hub.drawAux()
+            // The floating UI is drawn by every window; drawAux itself skips
+            // the ones that did not ask for it, so a dialog opened in one
+            // project's window never lands on another project.
+            hub.drawAux()
+            // Balloons are about the app, not one project, so the primary
+            // window is the single place they appear.
+            if (isPrimary) NotificationView.drawBalloons(core)
         } else {
             // hub mode: welcome + menu + aux + status bar
             hub.drawPrimary()
@@ -174,7 +253,13 @@ class WindowCtx(
 
     /** Destroys renderer/imgui/window resources (after the last frame). */
     fun closeRendering() {
+        // A dialog this window owned would otherwise stay open with nobody
+        // left to draw it; hand it back so the remaining window shows it.
+        if (core.uiWindowId == windowId) core.uiWindowId = -1
+        try { ImGui.setCurrentContext(context) } catch (_: Throwable) {}
         try { backend.close() } catch (_: Throwable) {}
+        // Destroying the current context clears ImGui's current-context slot,
+        // so the next window selects its own again.
         try { ImGui.destroyContext(context) } catch (_: Throwable) {}
         try { renderer.close() } catch (_: Throwable) {}
         try { window.close() } catch (_: Throwable) {}

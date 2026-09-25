@@ -248,6 +248,10 @@ class LspManager(
         }
     }
 
+    /** The running server that owns [doc], if any. */
+    fun runningClientFor(doc: Document): LspServerClient? =
+        clients.values.firstOrNull { it.isRunning && it.matches(doc.path) }
+
     /** Resolves a lazily-filled code action. */
     fun requestCodeActionResolve(doc: Document, action: cn.enaium.lsp.model.CodeAction, onResult: (cn.enaium.lsp.model.CodeAction?) -> Unit) {
         val client = matchingClient(doc)

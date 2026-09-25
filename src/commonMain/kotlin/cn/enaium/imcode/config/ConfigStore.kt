@@ -12,8 +12,17 @@ object ConfigStore {
         encodeDefaults = true
     }
 
-    val dirPath: String = ioFile(Platform.userHome).absolutePath + if (Platform.isWindows) "\\" else "/" + ".imcode"
-    val filePath: String = ioFile(dirPath).absolutePath + if (Platform.isWindows) "\\" else "/" + "config.json"
+    private val separator: String get() = if (Platform.isWindows) "\\" else "/"
+
+    /**
+     * Where the config lives: `~/.imcode` unless `IMCODE_CONFIG_DIR` points
+     * somewhere else (tests, and anyone running several profiles).
+     */
+    val dirPath: String
+        get() = Platform.getenv("IMCODE_CONFIG_DIR")?.takeIf { it.isNotBlank() }
+            ?: (ioFile(Platform.userHome).absolutePath + separator + ".imcode")
+
+    val filePath: String get() = ioFile(dirPath).absolutePath + separator + "config.json"
 
     fun load(): Config {
         return try {

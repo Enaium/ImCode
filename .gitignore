@@ -45,3 +45,4 @@ bin/
 
 # Local SDK path — must not be committed (see the file itself).
 local.properties
+imgui.ini

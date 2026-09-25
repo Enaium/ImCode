@@ -13,6 +13,7 @@ object KeyAction {
     const val SAVE_ALL = "saveAll"
     const val CLOSE_TAB = "closeTab"
     const val FIND_FILES = "findFiles"
+    const val GOTO_LINE = "gotoLine"
     const val RECENT_FILES = "recentFiles"
     const val SETTINGS = "settings"
     const val FONT_UP = "fontUp"
@@ -21,11 +22,20 @@ object KeyAction {
     const val NEW_WORKSPACE = "newWorkspace"
     const val WELCOME = "welcome"
     const val QUICK_FIX = "quickFix"
+    const val DEBUG_START = "debugStart"
+    const val DEBUG_PAUSE = "debugPause"
+    const val DEBUG_STEP_OVER = "debugStepOver"
+    const val DEBUG_STEP_INTO = "debugStepInto"
+    const val DEBUG_STEP_OUT = "debugStepOut"
+    const val DEBUG_RESTART = "debugRestart"
+    const val DEBUG_STOP = "debugStop"
 
     val ALL = listOf(
-        NEW_FILE, OPEN_FILE, OPEN_FOLDER, SAVE, SAVE_ALL, CLOSE_TAB, FIND_FILES,
+        NEW_FILE, OPEN_FILE, OPEN_FOLDER, SAVE, SAVE_ALL, CLOSE_TAB, FIND_FILES, GOTO_LINE,
         RECENT_FILES, SETTINGS, FONT_UP, FONT_DOWN, FONT_RESET, NEW_WORKSPACE, WELCOME,
         QUICK_FIX,
+        DEBUG_START, DEBUG_PAUSE, DEBUG_STEP_OVER, DEBUG_STEP_INTO, DEBUG_STEP_OUT,
+        DEBUG_RESTART, DEBUG_STOP,
     )
 
     fun label(action: String): String = when (action) {
@@ -44,6 +54,13 @@ object KeyAction {
         NEW_WORKSPACE -> "New Workspace Window"
         WELCOME -> "Welcome Screen"
         QUICK_FIX -> "Show Context Actions"
+        DEBUG_START -> "Start / Continue"
+        DEBUG_PAUSE -> "Pause"
+        DEBUG_STEP_OVER -> "Step Over"
+        DEBUG_STEP_INTO -> "Step Into"
+        DEBUG_STEP_OUT -> "Step Out"
+        DEBUG_RESTART -> "Restart"
+        DEBUG_STOP -> "Stop"
         else -> action
     }
 }
@@ -58,12 +75,21 @@ object DefaultShortcuts {
         KeyAction.SAVE_ALL to "Ctrl+Shift+S",
         KeyAction.CLOSE_TAB to "Ctrl+Shift+F4",
         KeyAction.FIND_FILES to "Ctrl+Shift+F",
+        KeyAction.GOTO_LINE to "Ctrl+L",
         KeyAction.RECENT_FILES to "Ctrl+E",
         KeyAction.SETTINGS to "Ctrl+Alt+S",
         KeyAction.FONT_UP to "Ctrl+=",
         KeyAction.FONT_DOWN to "Ctrl+-",
         KeyAction.FONT_RESET to "Ctrl+0",
         KeyAction.QUICK_FIX to "Alt+Enter",
+        // VS Code's debug keys, since the toolbar follows its layout.
+        KeyAction.DEBUG_START to "F5",
+        KeyAction.DEBUG_PAUSE to "F6",
+        KeyAction.DEBUG_STEP_OVER to "F10",
+        KeyAction.DEBUG_STEP_INTO to "F11",
+        KeyAction.DEBUG_STEP_OUT to "Shift+F11",
+        KeyAction.DEBUG_RESTART to "Ctrl+Shift+F5",
+        KeyAction.DEBUG_STOP to "Shift+F5",
     )
 }
 
@@ -160,8 +186,15 @@ object Keymap {
 
     private fun modDown(mod: String): Boolean = when (mod) {
         "Ctrl" -> {
-            if (Platform.isMac) ImGui.isKeyDown(ImGuiKey.LEFT_SUPER) || ImGui.isKeyDown(ImGuiKey.RIGHT_SUPER)
-            else ImGui.isKeyDown(ImGuiKey.LEFT_CTRL) || ImGui.isKeyDown(ImGuiKey.RIGHT_CTRL)
+            // The primary modifier is Command on macOS. This backend's
+            // Ctrl/Super mapping does not match the documentation (Cmd can
+            // arrive as Ctrl), so accept either physical key.
+            if (Platform.isMac) {
+                ImGui.isKeyDown(ImGuiKey.LEFT_SUPER) || ImGui.isKeyDown(ImGuiKey.RIGHT_SUPER) ||
+                    ImGui.isKeyDown(ImGuiKey.LEFT_CTRL) || ImGui.isKeyDown(ImGuiKey.RIGHT_CTRL)
+            } else {
+                ImGui.isKeyDown(ImGuiKey.LEFT_CTRL) || ImGui.isKeyDown(ImGuiKey.RIGHT_CTRL)
+            }
         }
         "Alt" -> ImGui.isKeyDown(ImGuiKey.LEFT_ALT) || ImGui.isKeyDown(ImGuiKey.RIGHT_ALT)
         "Shift" -> ImGui.isKeyDown(ImGuiKey.LEFT_SHIFT) || ImGui.isKeyDown(ImGuiKey.RIGHT_SHIFT)

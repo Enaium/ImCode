@@ -17,7 +17,8 @@ class WelcomeView {
 
     fun draw(core: AppCore, menuHeight: Float) {
         val w = ImGui.getIO().displaySize.x
-        val h = ImGui.getIO().displaySize.y - menuHeight
+        // the status bar owns the bottom strip here too
+        val h = ImGui.getIO().displaySize.y - menuHeight - StatusBar.height()
         ImGui.setNextWindowPos(ImVec2(0f, menuHeight), cn.enaium.imgui.ImGuiCond.ALWAYS)
         ImGui.setNextWindowSize(ImVec2(w, h), cn.enaium.imgui.ImGuiCond.ALWAYS)
         ImGui.pushStyleColor(ImGuiCol.WINDOW_BG, ImGui.colorConvertU32ToFloat4(0xFF14161A.toInt()))
@@ -52,22 +53,23 @@ class WelcomeView {
                     core.showSettings = true
                 }
 
-                ImGui.separatorText("Workspaces")
-                // the persisted session list (project record page): entries not
-                // currently open are opened on click, open ones are focused
-                for (entry in core.config.workspaces) {
-                    val name = ioFile(entry.dir).name
-                    val open = core.workspaces.firstOrNull { it.dir == entry.dir }
-                    if (ImGui.selectable("$name##ws-${entry.dir}", open != null, 0, ImVec2(520f, 0f))) {
-                        if (open != null) core.focusWorkspace(open) else core.openWorkspaceWindow(entry)
+                ImGui.separatorText("Projects")
+                // Every folder opened before (a history that survives restarts,
+                // unlike the open windows): open ones are focused, others open
+                // through the folder policy.
+                for (entry in core.config.recentFolders) {
+                    val name = ioFile(entry.path).name
+                    val open = core.workspaces.firstOrNull { it.dir == entry.path }
+                    if (ImGui.selectable("$name##ws-${entry.path}", open != null, 0, ImVec2(520f, 0f))) {
+                        if (open != null) core.focusWorkspace(open) else core.openFolder(entry.path)
                     }
                     ImGui.sameLine(520f)
                     ImGui.pushStyleColor(ImGuiCol.TEXT, ImGui.colorConvertU32ToFloat4(0xFF7788AA.toInt()))
-                    ImGui.textDisabled(entry.dir)
+                    ImGui.textDisabled(entry.path)
                     ImGui.popStyleColor()
                 }
-                if (core.config.workspaces.isEmpty()) {
-                    ImGui.textDisabled("  No workspaces yet - open a folder to get started.")
+                if (core.config.recentFolders.isEmpty()) {
+                    ImGui.textDisabled("  No folders opened yet - open one to get started.")
                 }
 
                 ImGui.separatorText("Recent Files")

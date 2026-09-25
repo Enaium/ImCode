@@ -5,6 +5,8 @@ import cn.enaium.imgui.extensions.filedialog.FileDialog
 import cn.enaium.imgui.extensions.filedialog.FileDialogConfig
 import cn.enaium.imgui.extensions.filedialog.FileDialogInstance
 import cn.enaium.imgui.extensions.filedialog.IgfdFlags
+import cn.enaium.imcode.app.OutputLog
+import cn.enaium.imcode.platform.ioFile
 
 /**
  * One-shot file dialogs over the ImGuiFileDialog binding. Call [render] every
@@ -46,17 +48,45 @@ class FileDialogs {
             PendingKind.OPEN_FOLDER -> "imcode-open-dir"
             null -> return
         }
-        val open = FileDialog.displayDialog(dialog, key, minSize = ImVec2(520f, 380f), maxSize = ImVec2(1600f, 1200f))
-        isOpen = open
-        if (!open) return
-
-        if (FileDialog.isOk(dialog)) {
-            val selection = FileDialog.getSelection(dialog)
-            val paths = selection.map { it.second }.filter { it.isNotBlank() }
-            finish(paths)
-        } else if (!FileDialog.isKeyOpened(dialog, key)) {
-            finish(emptyList())
+        // `displayDialog` returns true only on the frame a result is ready (OK
+        // or Cancel pressed), not "while the dialog is open". ImGuiFileDialog
+        // also does not close itself: it keeps the dialog in its state until
+        // the host calls closeDialog, so a result that is not consumed here
+        // leaves the window on screen forever — which is exactly what Cancel
+        // used to do.
+        val hasResult = FileDialog.displayDialog(
+            dialog, key,
+            minSize = ImVec2(520f, 380f),
+            maxSize = ImVec2(1600f, 1200f),
+        )
+        isOpen = FileDialog.isKeyOpened(dialog, key)
+        if (!hasResult) return
+        // OK delivers a selection; Cancel leaves IsOk false and delivers none,
+        // which the callback receives as an empty list.
+        val ok = FileDialog.isOk(dialog)
+        val paths = if (ok) {
+            val selection = FileDialog.getSelection(dialog).map { it.second }.filter { it.isNotBlank() }
+            if (pending == PendingKind.OPEN_FOLDER) {
+                // A directory dialog reports the selection as the file name
+                // joined to the current path, so a folder that is entered
+                // *after* being selected comes back as `.../src/src`. Only a
+                // path that really is a directory can be the chosen folder;
+                // otherwise the folder the dialog is in is the answer.
+                val picked = selection.filter { ioFile(it).isDirectory }
+                if (picked.isNotEmpty()) {
+                    picked
+                } else {
+                    listOfNotNull(FileDialog.getCurrentPath(dialog).takeIf { it.isNotBlank() })
+                }
+            } else {
+                selection
+            }
+        } else {
+            emptyList()
         }
+        OutputLog.info("App", "dialog $key finished: ok=$ok paths=$paths")
+        FileDialog.closeDialog(dialog, key)
+        finish(paths)
     }
 
     private fun finish(paths: List<String>) {

@@ -8,9 +8,11 @@ import cn.enaium.imgui.ImGuiWindowFlags
 import cn.enaium.imgui.ImVec2
 import cn.enaium.imgui.ImVec4
 import cn.enaium.imcode.app.AppCore
+import cn.enaium.imcode.config.Config
 import cn.enaium.imcode.config.KeyAction
 import cn.enaium.imcode.config.Keymap
 import cn.enaium.imcode.config.LspServer
+import cn.enaium.imcode.platform.ioFile
 import cn.enaium.imcode.util.ShellWords
 import cn.enaium.lsp.edit.JetBrainsThemes
 
@@ -91,12 +93,67 @@ class SettingsWindow {
         ImGui.end()
     }
 
+    /**
+     * One font-file row: the path with a Browse button, a Clear button, and an
+     * existence warning.
+     *
+     * The warning matters: ImGui cannot report a font file that failed to
+     * load (the binding hands back a handle either way), so a typo would
+     * otherwise render text with the built-in font — or, for the main font,
+     * render nothing at all — without saying anything.
+     */
+    private fun drawFontPath(
+        core: AppCore,
+        cfg: Config,
+        label: String,
+        select: (Config) -> String,
+        update: (Config, String) -> Config,
+    ) {
+        ImGui.setNextItemWidth((ImGui.getContentRegionAvail().x - 170f).coerceAtLeast(120f))
+        val typed = ImGui.inputText("$label##font-$label", select(cfg))
+        if (typed != null && typed != select(cfg)) {
+            core.updateConfig(update(cfg, typed.trim()))
+            core.saveState()
+        }
+        ImGui.sameLine()
+        if (ImGui.button("Browse...##font-$label")) {
+            core.fileDialogs.pickFiles(
+                "$label (TTF/OTF/TTC)",
+                "Fonts (*.ttf;*.otf;*.ttc;*.TTF;*.OTF;*.TTC){.ttf,.otf,.ttc},All files (*.*){.}",
+            ) { paths ->
+                val picked = paths.firstOrNull() ?: return@pickFiles
+                core.updateConfig(update(core.config, picked))
+                core.saveState()
+            }
+        }
+        ImGui.sameLine()
+        if (ImGui.button("Clear##font-$label")) {
+            core.updateConfig(update(cfg, ""))
+            core.saveState()
+        }
+        val value = select(core.config)
+        if (value.isNotBlank() && !ioFile(value).exists) {
+            ImGui.pushStyleColor(ImGuiCol.TEXT, ImVec4(1f, 0.45f, 0.4f, 1f))
+            ImGui.textWrapped("Not found: $value")
+            ImGui.popStyleColor()
+        }
+    }
+
     private fun drawGeneral(core: AppCore) {
         var cfg = core.config
+        ImGui.separatorText("Fonts")
         val fontSize = FloatArray(1) { cfg.fontSize }
         if (ImGui.sliderFloat("Font size", fontSize, 10f, 24f, "%.1f")) {
             core.adjustFontTo(fontSize[0])
         }
+        drawFontPath(core, cfg, "Main font", Config::mainFontPath) { c, v -> c.copy(mainFontPath = v) }
+        drawFontPath(core, cfg, "Fallback font", Config::fallbackFontPath) { c, v -> c.copy(fallbackFontPath = v) }
+        textDisabledWrapped(
+            "Font size applies immediately (restart ImCode to have the glyphs re-rasterized crisply at the new size). " +
+                "Font files are read when a window builds its font atlas, so a changed path applies after a restart. " +
+                "The fallback is merged into the main font for the glyphs it lacks (CJK, symbols).",
+        )
+        cfg = core.config
         val rpc = BooleanArray(1) { cfg.rpcLogging }
         if (ImGui.checkbox("Log every LSP RPC message (Output > LSP tab)", rpc)) {
             cfg = cfg.copy(rpcLogging = rpc[0])
@@ -113,6 +170,23 @@ class SettingsWindow {
             core.saveState()
         }
         textDisabledWrapped("When enabled, ImCode reopens the projects from your previous session. When disabled, the project list page is shown at startup.")
+        ImGui.separatorText("Folders")
+        ImGui.setNextItemWidth(240f)
+        var policy = cfg.openFolderPolicy
+        if (ImGui.beginCombo("Open Folder", cn.enaium.imcode.config.OpenFolderPolicy.label(policy))) {
+            for (option in cn.enaium.imcode.config.OpenFolderPolicy.ALL) {
+                if (ImGui.selectable(cn.enaium.imcode.config.OpenFolderPolicy.label(option), option == policy)) {
+                    policy = option
+                    cfg = cfg.copy(openFolderPolicy = option)
+                    core.updateConfig(cfg)
+                    core.saveState()
+                }
+            }
+            ImGui.endCombo()
+        }
+        textDisabledWrapped(
+            "Where an opened folder goes when a window is already open: a new window, the window that has the focus, or ask every time.",
+        )
         ImGui.separatorText("Editor")
         val ed = cfg.editor
         val tabSize = IntArray(1) { ed.tabSize }

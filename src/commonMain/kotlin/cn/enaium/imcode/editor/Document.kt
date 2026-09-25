@@ -78,6 +78,12 @@ class Document(
     /** While true, edits do not re-trigger the completion popup (accepting
      *  a completion must not reopen it). */
     var suppressAutoCompletion: Boolean = false
+
+    /**
+     * Editor-side LSP binding (lsp-edit): owns the features the IDE no longer
+     * implements itself (code actions first, the rest follow as they move).
+     */
+    var lspEditor: cn.enaium.lsp.edit.lsp.LspEditor? = null
     var completionItems: List<CompletionRow> = emptyList()
     var completionSelected: Int = 0
     var completionActive: Boolean = false

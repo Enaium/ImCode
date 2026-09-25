@@ -1,6 +1,6 @@
 # ImCode
 
-![](https://img.cdn1.vip/i/6aa6c85732dab_1789315159.webp)
+![](https://img.cdn1.vip/i/6ab65a8494295_1790335620.webp)
 
 An IDE built on Dear ImGui. Kotlin Multiplatform, rendered through
 [imgui-kmp](https://github.com/Enaium/imgui-kmp) and
@@ -19,12 +19,27 @@ tokens), speaking to language servers through
 - Welcome screen with the remembered project list (reopen last session is
   optional), recent files, multi-window support.
 - File explorer: single click selects, double click opens, folders toggle with
-  a double click or the arrow; reveal-file action.
+  a double click or the arrow; reveal-file action. Folders and files carry
+  IntelliJ file-type icons (`FileIcons`, xicons).
 - Tabs with per-tab close, "Close Others / Left / Right / Unmodified", middle
-  click, unsaved-change prompts.
+  click, unsaved-change prompts; each tab shows its file-type icon.
 - Output panel (one tab per language server plus the app log) and a status bar
   with caret position, modified state, diagnostic counts, language, live
   work-done progress and the server status.
+
+### Debugging
+
+- Debug toolbar above the editor (VS Code layout): continue/pause, step over,
+  step into, step out, restart, stop — each with the IntelliJ run icon, plus
+  the adapter name and where the program stopped.
+- Start with F5 (Run menu), pause F6, step F10/F11/Shift+F11, restart
+  Ctrl+Shift+F5, stop Shift+F5; breakpoints come from the gutter (click the
+  line-number strip, or F9) and are sent to the adapter before the debuggee
+  starts.
+- The gutter shows the adapter's verdict: verified, rejected, disabled and
+  logpoint breakpoints each draw their own IntelliJ icon.
+- Adapters are matched to files the same way language servers are
+  (`debugAdapters` in the config); the Python one is debugpy over stdio.
 
 ### Editor (from lsp-edit)
 
@@ -33,14 +48,15 @@ tokens), speaking to language servers through
 - Folding: boxed `+`/`-` gutter markers, click the `...` to unfold, hover it for
   a resizable, syntax-colored preview of the hidden lines.
 - Completion: server-resolved `labelDetails` (parameters/source inline, type
-  right-aligned), automatic imports through `completionItem/resolve`, a
-  documentation side panel, one-undo-step acceptance, and a live resolve log.
+  right-aligned), an IntelliJ icon per item kind, automatic imports through
+  `completionItem/resolve`, a documentation side panel, one-undo-step
+  acceptance, and a live resolve log.
 - Hover with markdown and highlighted code blocks, signature help, inlay hints,
   code lenses, go-to-definition, references, rename.
 - 46 JetBrains IntelliJ color themes (`EditorPalette` slots), selectable in
   Settings.
 - Scroll-follow that never fights manual scrolling; wrap, minimap, line
-  numbers and font size are per-editor preferences.
+  numbers are per-editor preferences.
 
 ### Language servers (LSP)
 
@@ -106,8 +122,18 @@ Command-line flags (headless/CI friendly):
 Everything persists as JSON in `~/.imcode/config.json`:
 
 - `lspServers` — name, file patterns (`*.kt, *.kts`), command line;
-- `editor` — font size, tab size, spaces-vs-tabs, word wrap, line numbers,
-  minimap, theme name;
+- `editor` — tab size, spaces-vs-tabs, word wrap, line numbers, minimap,
+  theme name;
+- `debugAdapters` — name, file patterns and command line (e.g.
+  `python3 -m debugpy.adapter`) plus the `launch` arguments as JSON, where
+  `$FILE` and `$DIR` are substituted per session;
+- `fontSize`, `mainFontPath`, `fallbackFontPath` — fonts for the whole UI
+  (Settings → General → Fonts). The fallback TTF/OTF/TTC is merged into the
+  main font for the glyphs it lacks (CJK, symbols). Size follows immediately;
+  the font files are read when a window builds its font atlas, so a changed
+  path applies after a restart. Paths are validated in the dialog — ImGui
+  cannot report a font file that failed to load, so a typo would otherwise
+  stay silent;
 - `shortcuts` — per-action key chords; unset actions fall back to IntelliJ
   defaults (rebindable under Settings → Keymap, which also lists every action
   with its effective chord);

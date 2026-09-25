@@ -2,6 +2,7 @@ package cn.enaium.imcode
 
 import cn.enaium.imgui.ImFontConfig
 import cn.enaium.imgui.ImGui
+import cn.enaium.imgui.ImTextureID
 import cn.enaium.imgui.ImVec2
 import cn.enaium.imcode.app.Mailbox
 import cn.enaium.imcode.config.Config
@@ -35,7 +36,7 @@ class CompletionAcceptProbeTest {
             io.deltaTime = 1f / 60f
             io.fonts.addFontDefault(ImFontConfig(sizePixels = 13f))
             check(io.fonts.build()) { "font build failed" }
-            io.fonts.setTexID(0)
+            io.fonts.setTexID(ImTextureID(0uL))
 
             val m = mgr()
             val editor = Editor(initialText = "p", language = cn.enaium.lsp.edit.Language.kotlin)
@@ -68,7 +69,7 @@ class CompletionAcceptProbeTest {
             io.deltaTime = 1f / 60f
             io.fonts.addFontDefault(ImFontConfig(sizePixels = 13f))
             check(io.fonts.build()) { "font build failed" }
-            io.fonts.setTexID(0)
+            io.fonts.setTexID(ImTextureID(0uL))
 
             val m = mgr()
             val editor = Editor(initialText = "PI", language = cn.enaium.lsp.edit.Language.kotlin)
@@ -118,7 +119,7 @@ class CompletionAcceptProbeTest {
             io.deltaTime = 1f / 60f
             io.fonts.addFontDefault(ImFontConfig(sizePixels = 13f))
             check(io.fonts.build()) { "font build failed" }
-            io.fonts.setTexID(0)
+            io.fonts.setTexID(ImTextureID(0uL))
 
             val m = mgr()
             val editor = Editor(initialText = "PI", language = cn.enaium.lsp.edit.Language.kotlin)

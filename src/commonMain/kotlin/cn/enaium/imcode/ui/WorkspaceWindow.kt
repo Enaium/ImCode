@@ -51,6 +51,9 @@ class WorkspaceWindow(val dir: String) {
     private var newFileName: String? = null
     private val newFileOpen = BooleanArray(1) { false }
 
+    /** True while this window's new-file prompt is up: it owns the keyboard. */
+    val newFilePromptOpen: Boolean get() = newFileOpen[0]
+
     /** Docking node ids of the panes (built once on the first dock frame). */
     private var dockExplorer = 0
     private var dockEditors = 0
@@ -126,19 +129,12 @@ class WorkspaceWindow(val dir: String) {
     private var signatureActive = false
 
     /** Inline rename session (null when inactive). */
-    private var inlineRename: InlineRenameSession? = null
 
-    /** Diagnostics markers saved while rename highlights are shown. */
-    private var renameMarkerBackup: HashMap<Int, cn.enaium.lsp.edit.EditorMarker>? = null
 
     /** Code actions for the last request (rendered in the list window). */
     private var codeActions: List<cn.enaium.lsp.model.CodeAction> = emptyList()
 
-    /** Whether the code-actions list window is showing. */
-    private var codeActionsOpen = false
 
-    /** Document the actions were requested for. */
-    private var codeActionDoc: Document? = null
 
     /** References panel state. */
     private var referencesOpen = false
@@ -258,9 +254,11 @@ class WorkspaceWindow(val dir: String) {
 
     fun draw(core: AppCore) {
         coreRef = core
+        core.documents.drainLspEditors(dir)
         paneFocused = false
 
         // Route the editor context-menu LSP actions to this window's UI.
+        core.documents.onBreakpointsChanged = { core.debug.onBreakpointsChanged(it) }
         core.documents.onFindReferences = { _ -> openReferences(core) }
         core.documents.onRenameRequested = { _ -> openRename(core) }
         core.documents.onCodeActionsRequested = { _ -> openCodeActions(core) }
@@ -271,7 +269,8 @@ class WorkspaceWindow(val dir: String) {
         val menuH = ImGui.getFrameHeight()
 
         val w = ImGui.getIO().displaySize.x
-        val h = ImGui.getIO().displaySize.y - menuH
+        // the status bar owns the bottom strip, like IntelliJ's
+        val h = ImGui.getIO().displaySize.y - menuH - StatusBar.height()
 
         // ---- dock host window: owns the DockSpace below the menu bar ----
         // Official fullscreen-dockspace pattern: the DockSpace must be submitted
@@ -305,12 +304,17 @@ class WorkspaceWindow(val dir: String) {
         renderStructurePane(core)
         renderOutputPane()
 
+        // the status bar is the bottom strip of the window
+        StatusBar.draw(core, this)
+
+        // the debug toolbar floats over the editor; drawn here, at the top
+        // level, so its window is not nested inside a docked pane
+        DebugToolbar.draw(core, this)
+
         // modals (drawn inside this window's context)
         pendingClosePath?.let { renderUnsavedModal(core, it) }
         if (core.pendingCloseWs == this) renderWorkspaceCloseModal(core)
         if (newFileOpen[0]) renderNewFileModal(core)
-        renderInlineRename(core)
-        if (codeActionsOpen) renderCodeActionsWindow(core)
         if (referencesOpen) renderReferencesWindow(core)
 
         isFocusedThisFrame = paneFocused
@@ -321,7 +325,6 @@ class WorkspaceWindow(val dir: String) {
      *  vertically) honoring the persisted pane sizes; runs once per window,
      *  after the DockSpace sized the root node. */
     private fun setupDocking(dockId: Int, w: Float, h: Float) {
-        dockingReady = true
         // the root node was created and sized by the DockSpace call this frame
         val explorerRatio = (explorerWidth / w).coerceIn(0.12f, 0.75f)
         val outputRatio = (outputHeight / h).coerceIn(0.08f, 0.6f)
@@ -330,6 +333,12 @@ class WorkspaceWindow(val dir: String) {
         val (outputNode, midNode) = ImGui.dockBuilderSplitNode(restNode, ImGuiDir.DOWN, outputRatio)
         // Editors get the wide side; Structure is a slim outline column.
         val (structureNode, editorsNode) = ImGui.dockBuilderSplitNode(midNode, ImGuiDir.RIGHT, 0.22f)
+        if (explorerNode == 0 || editorsNode == 0 || outputNode == 0 || structureNode == 0) {
+            // The dock node did not exist yet (the builder returns 0 for an
+            // unknown node). Retry on the next frame instead of latching a
+            // layout that leaves every pane hidden.
+            return
+        }
         ImGui.dockBuilderDockWindow("Explorer##ws-${dir}", explorerNode)
         ImGui.dockBuilderDockWindow("Editors##ws-${dir}", editorsNode)
         ImGui.dockBuilderDockWindow("Structure##ws-${dir}", structureNode)
@@ -339,6 +348,7 @@ class WorkspaceWindow(val dir: String) {
         dockEditors = editorsNode
         dockOutput = outputNode
         dockStructure = structureNode
+        dockingReady = true
     }
 
     private fun renderExplorerPane() {
@@ -376,7 +386,8 @@ class WorkspaceWindow(val dir: String) {
         val docs = core.documents
         val tabH = ImGui.getFrameHeight()
         val scrollbarH = 12f // room for the horizontal tab scrollbar
-        val editorH = (ImGui.getContentRegionAvail().y - tabH - scrollbarH - 10f).coerceAtLeast(40f)
+        val editorH = (ImGui.getContentRegionAvail().y - tabH - scrollbarH - 10f)
+            .coerceAtLeast(40f)
         val noScroll = ImGuiWindowFlags.NO_SCROLLBAR or ImGuiWindowFlags.NO_SCROLL_WITH_MOUSE
 
         // tab row: custom strip — selection is owned by activeFile alone.
@@ -393,7 +404,8 @@ class WorkspaceWindow(val dir: String) {
             for (path in openTabs.toList()) {
                 val doc = docs.get(path) ?: continue
                 val selected = path == activeFile
-                val label = doc.name + if (doc.dirty) " *" else ""
+                val label = IconLayout.spacesFor(IconLayout.gutter()) + doc.name +
+                    if (doc.dirty) " *" else ""
                 if (selected) {
                     // Stronger active-tab styling: brighter fill + top accent
                     // line, VS Code style.
@@ -402,6 +414,13 @@ class WorkspaceWindow(val dir: String) {
                     ImGui.pushStyleColor(ImGuiCol.BUTTON_ACTIVE, ImGui.colorConvertU32ToFloat4(0xFF3A5A76.toInt()))
                 }
                 if (ImGui.button(label + "##tab-" + path)) clicked = path
+                // Same leading-gutter trick as the explorer rows: the label
+                // carries the indent, the icon is drawn centered into it.
+                IconLayout.drawCentered(
+                    FileIcons.forFile(doc.name),
+                    ImGui.getItemRectMin(),
+                    ImGui.getItemRectMax(),
+                )
                 if (ImGui.isItemHovered()) ImGui.setTooltip(doc.path)
                 if (selected && activeChanged) {
                     // Bring the selected tab into view (0.5 = center it).
@@ -467,6 +486,9 @@ class WorkspaceWindow(val dir: String) {
                     maybeRequestInlayHints(core, doc)
                     maybeRequestSignature(core, doc)
                     doc.editor.render("##editor-${doc.path}", ImVec2(-1f, -1f))
+                    // The code-action list (and later the other popups) is
+                    // drawn by the editor binding, anchored at the caret.
+                    doc.lspEditor?.renderCodeActionPopup()
                     renderLspOverlays(core, doc)
                 }
             } else {
@@ -759,7 +781,9 @@ class WorkspaceWindow(val dir: String) {
     /** Renders completion/hover/signature overlays after the editor. */
     private fun renderLspOverlays(core: AppCore, doc: Document) {
         renderCompletionPopup(core, doc)
-        renderHoverPopup(core, doc)
+        // Hover documentation is drawn by the editor binding: offset from the
+        // pointer, stays open while the pointer is on it, resizable.
+        doc.lspEditor?.renderHoverTooltip()
         if (signatureActive && signatureHelp != null) {
             renderSignaturePopup(doc)
         }
@@ -854,7 +878,19 @@ class WorkspaceWindow(val dir: String) {
                 ImGuiTreeNodeFlags.OPEN_ON_DOUBLE_CLICK or
                 ImGuiTreeNodeFlags.DEFAULT_OPEN
             if (children.isEmpty()) flags = flags or ImGuiTreeNodeFlags.LEAF
-            val opened = ImGui.treeNodeEx(label + id, flags)
+            // Same leading-gutter treatment as the explorer tree: the label
+            // carries the indent, the kind icon is drawn past the arrow. The
+            // gutter is reserved for every node so names stay in one column
+            // even where a kind has no icon.
+            val opened = ImGui.treeNodeEx(IconLayout.spacesFor(IconLayout.gutter()) + label + id, flags)
+            SymbolIcons.iconFor(sym.kind)?.let {
+                IconLayout.drawCentered(
+                    it,
+                    ImGui.getItemRectMin(),
+                    ImGui.getItemRectMax(),
+                    xOffset = IconLayout.treeLabelOffset(),
+                )
+            }
             if (ImGui.isItemClicked()) {
                 // Click: navigate to the symbol's selection range.
                 val start = sym.selectionRange.start
@@ -920,16 +956,25 @@ class WorkspaceWindow(val dir: String) {
         core.documents.resolveCompletionRows(doc)
         val maxItems = 20
         val count = minOf(items.size, maxItems)
+        // Every row reserves the icon gutter (labels stay in one column even
+        // when a row's kind has no icon); the label carries the indent so the
+        // row highlight still spans the full width.
+        val gutter = IconLayout.gutter()
+        val indent = IconLayout.spacesFor(gutter)
+        // The indent is whole spaces, so it rarely equals `gutter` exactly;
+        // measure what the label actually starts with.
+        val indentWidth = ImGui.calcTextSize(indent).x
         for (i in 0 until count) {
             val row = items[i]
             val selected = i == doc.completionSelected
-            if (ImGui.selectable(row.label + "##c-${dir}-${i}", selected)) {
+            if (ImGui.selectable(indent + row.label + "##c-${dir}-${i}", selected)) {
                 core.documents.acceptCompletion(doc, i)
                 ImGui.end()
                 return
             }
             val rowMin = ImGui.getItemRectMin()
             val rowMax = ImGui.getItemRectMax()
+            KindIcons.iconFor(row.kind)?.let { IconLayout.drawCentered(it, rowMin, rowMax) }
             // Grey, non-interactive suffix: the signature detail right after
             // the label.
             if (row.detail.isNotEmpty()) {
@@ -949,7 +994,7 @@ class WorkspaceWindow(val dir: String) {
                 // default, so its rect right edge is the row end (the check
                 // never passed and the column was never drawn).
                 val tw = ImGui.calcTextSize(row.trailing).x
-                val textEnd = ImGui.getWindowPos().x + 8f +
+                val textEnd = rowMin.x + indentWidth +
                     ImGui.calcTextSize(row.label).x +
                     if (row.detail.isNotEmpty()) 6f + ImGui.calcTextSize(row.detail).x else 0f
                 val right = ImGui.getWindowPos().x + ImGui.getWindowSize().x - 8f
@@ -1034,53 +1079,6 @@ class WorkspaceWindow(val dir: String) {
     private var hoverWindowMin: ImVec2? = null
     private var hoverWindowMax: ImVec2? = null
 
-    /**
-     * Hover popup from the cached LSP hover text. A regular (non-tooltip)
-     * window so the pointer can move onto it: while hovered it stays open
-     * even though the editor already ended the code hover, and it can be
-     * resized with the mouse. Closing happens here — when the pointer is on
-     * neither the code nor the popup.
-     */
-    private fun renderHoverPopup(core: AppCore, doc: Document) {
-        val text = doc.hoverText
-        val mouse = ImGui.getMousePos()
-        val onPopup = hoverWindowMin?.let { min ->
-            val max = hoverWindowMax ?: min
-            mouse.x >= min.x && mouse.x <= max.x && mouse.y >= min.y && mouse.y <= max.y
-        } ?: false
-        if (text.isNullOrBlank() || (!doc.hoverActive && !onPopup)) {
-            if (text != null) doc.hoverText = null
-            hoverWindowMin = null
-            hoverWindowMax = null
-            return
-        }
-        ImGui.setNextWindowPos(ImGui.getMousePos(), cn.enaium.imgui.ImGuiCond.APPEARING)
-        ImGui.setNextWindowSize(ImVec2(440f, 0f), cn.enaium.imgui.ImGuiCond.APPEARING)
-        ImGui.setNextWindowSizeConstraints(
-            ImVec2(260f, 60f),
-            ImVec2(1600f, ImGui.getIO().displaySize.y * 0.9f),
-        )
-        ImGui.begin(
-            "##hover-${dir}",
-            null,
-            ImGuiWindowFlags.NO_TITLE_BAR or
-                ImGuiWindowFlags.NO_FOCUS_ON_APPEARING or ImGuiWindowFlags.NO_NAV_FOCUS,
-        )
-        // Markdown rendering with fenced code blocks (read-only highlighted
-        // via MarkdownCode) and inline-code chips, like the lsp-edit hover.
-        cn.enaium.lsp.edit.MarkdownCode.render(
-            core.markdownConfig,
-            text,
-            language = doc.editor.language,
-            palette = doc.editor.palette,
-        )
-        val pos = ImGui.getWindowPos()
-        val size = ImGui.getWindowSize()
-        hoverWindowMin = pos
-        hoverWindowMax = ImVec2(pos.x + size.x, pos.y + size.y)
-        ImGui.end()
-    }
-
     // ==================== rename / references (host UI) ====================
 
     /** Opens the rename dialog for the symbol under the caret. */
@@ -1089,178 +1087,28 @@ class WorkspaceWindow(val dir: String) {
      * name range), every other occurrence is highlighted live, Enter asks the
      * server to rename and Esc cancels.
      */
+    /**
+     * Starts the editor's in-place rename (the symbol becomes the selection,
+     * occurrences follow live); committing hands the new name to the server.
+     */
     fun openRename(core: AppCore) {
         val doc = core.activeDoc() ?: return
-        val editor = doc.editor
-        val pos = editor.cursor
-        val lineText = editor.buffer.line(pos.line)
-        var start = pos.index
-        var end = pos.index
-        while (start > 0 && isRenameChar(lineText[start - 1])) start--
-        while (end < lineText.length && isRenameChar(lineText[end])) end++
-        if (start == end) return
-        inlineRename = InlineRenameSession(
-            path = doc.path,
-            line = pos.line,
-            startIndex = start,
-            endIndex = end,
-            original = lineText.substring(start, end),
-            text = lineText.substring(start, end),
-            screenX = editor.posScreenX(pos.line, start),
-            screenY = editor.posScreenY(pos.line) ?: editor.caretScreenY(),
-        )
-    }
-
-    private fun isRenameChar(c: Char): Boolean = c.isLetterOrDigit() || c == '_'
-
-    /** Inline rename editor drawn over the symbol's name range. */
-    private fun renderInlineRename(core: AppCore) {
-        val r = inlineRename ?: return
-        val doc = core.documents.get(r.path)
-        if (doc == null || core.activeDoc()?.path != r.path) {
-            endInlineRename(doc)
-            return
-        }
-        ImGui.setNextWindowPos(ImVec2(r.screenX, r.screenY - 2f), cn.enaium.imgui.ImGuiCond.ALWAYS)
-        ImGui.setNextWindowSize(ImVec2(180f, 0f), cn.enaium.imgui.ImGuiCond.ALWAYS)
-        ImGui.begin(
-            "##inline-rename-${dir}",
-            null,
-            ImGuiWindowFlags.NO_TITLE_BAR or ImGuiWindowFlags.NO_RESIZE or ImGuiWindowFlags.NO_MOVE or
-                ImGuiWindowFlags.ALWAYS_AUTO_RESIZE or ImGuiWindowFlags.NO_SCROLLBAR or
-                ImGuiWindowFlags.NO_FOCUS_ON_APPEARING or ImGuiWindowFlags.NO_NAV_FOCUS,
-        )
-        if (r.focusInput) {
-            ImGui.setKeyboardFocusHere()
-        }
-        val edited = ImGui.inputText("##ir-${dir}", r.text) ?: r.text
-        val cur = inlineRename!!
-        if (ImGui.isKeyPressed(cn.enaium.imgui.ImGuiKey.ESCAPE)) {
-            endInlineRename(doc)
-            ImGui.end()
-            return
-        }
-        if (ImGui.isKeyPressed(cn.enaium.imgui.ImGuiKey.ENTER) && edited.isNotBlank()) {
-            val newName = edited.trim()
-            endInlineRename(doc)
-            ImGui.end()
-            if (newName != cur.original) {
-                core.lsp.requestRename(doc, Position(cur.line, cur.startIndex), newName) { edit ->
-                    if (edit != null) core.applyWorkspaceEditPublic(edit)
-                }
+        doc.editor.onRenameCommit = { line, index, newName ->
+            core.lsp.requestRename(doc, Position(line, index), newName) { edit ->
+                if (edit != null) core.applyWorkspaceEditPublic(edit)
             }
-            return
         }
-        inlineRename = cur.copy(text = edited, focusInput = false)
-        // Live linkage: tint every occurrence of the original name.
-        applyRenameHighlights(doc, cur.original)
-        ImGui.end()
+        doc.editor.startRename()
     }
 
-    /** Marks all whole-word occurrences of [symbol] with a selection tint. */
-    private fun applyRenameHighlights(doc: Document, symbol: String) {
-        if (renameMarkerBackup == null) renameMarkerBackup = HashMap(doc.editor.markers)
-        val word = Regex("\\b" + Regex.escape(symbol) + "\\b")
-        val lineColor = doc.editor.palette[cn.enaium.lsp.edit.PaletteIndex.LINE_NUMBER]
-        val hl = doc.editor.palette[cn.enaium.lsp.edit.PaletteIndex.SELECTION]
-        val markers = doc.editor.markers
-        for (l in 0 until doc.editor.buffer.lineCount()) {
-            val text = doc.editor.buffer.line(l)
-            val ranges = word.findAll(text).map { it.range.first to it.range.last + 1 }.toList()
-            if (ranges.isEmpty()) {
-                val saved = renameMarkerBackup?.get(l)
-                if (saved != null) markers[l] = saved else markers.remove(l)
-                continue
-            }
-            markers[l] = cn.enaium.lsp.edit.EditorMarker(
-                lineNumberColor = lineColor,
-                underlineColor = hl,
-                underlineRanges = ranges,
-            )
-        }
-        doc.editor.invalidateAll()
-    }
-
-    /** Leaves inline rename, restoring the diagnostics markers. */
-    private fun endInlineRename(doc: Document?) {
-        inlineRename = null
-        val backup = renameMarkerBackup ?: return
-        renameMarkerBackup = null
-        doc?.editor?.markers?.let { markers ->
-            markers.clear()
-            markers.putAll(backup)
-            doc.editor.invalidateAll()
-        }
-    }
-
-    /** Requests code actions for the caret/selection and shows the list. */
+    /**
+     * Code actions: the list, its keyboard handling and the edit/command
+     * application live in the editor (lsp-edit); this only asks it to open.
+     */
     fun openCodeActions(core: AppCore) {
         val doc = core.activeDoc() ?: return
-        val editor = doc.editor
-        val sel = editor.selectionBounds()
-        val range = if (sel != null) {
-            Position(sel.first.line, sel.first.index) to Position(sel.second.line, sel.second.index)
-        } else {
-            val line = editor.cursor.line
-            Position(line, 0) to Position(line, editor.buffer.line(line).length)
-        }
-        // The server computes quick fixes from the diagnostics overlapping
-        // the requested range.
-        val diagnostics = doc.diagnostics.filter { d ->
-            d.range.start.line <= range.second.line && d.range.end.line >= range.first.line
-        }
-        codeActionDoc = doc
-        core.lsp.requestCodeActions(
-            doc,
-            cn.enaium.lsp.model.Range(range.first, range.second),
-            diagnostics,
-        ) { actions ->
-            codeActions = actions
-            codeActionsOpen = true
-        }
-    }
-
-    private fun renderCodeActionsWindow(core: AppCore) {
-        val openArr = BooleanArray(1) { codeActionsOpen }
-        ImGui.setNextWindowSize(ImVec2(440f, 320f), cn.enaium.imgui.ImGuiCond.ONCE)
-        if (ImGui.begin("Code Actions##ws-${dir}", openArr, ImGuiWindowFlags.NO_COLLAPSE)) {
-            if (!openArr[0]) codeActionsOpen = false
-            if (codeActions.isEmpty()) {
-                ImGui.textDisabled("  No code actions available.")
-            } else {
-                for ((i, action) in codeActions.withIndex()) {
-                    val title = action.title + if (action.isPreferred == true) "  (preferred)" else ""
-                    val enabled = action.disabled == null
-                    if (ImGui.selectable(title + "##ca-${dir}-$i", false) && enabled) {
-                        applyCodeAction(core, action)
-                        codeActionsOpen = false
-                    }
-                }
-            }
-        }
-        ImGui.end()
-    }
-
-    /** Applies a code action: its edit, its command, or resolve-then-apply. */
-    private fun applyCodeAction(core: AppCore, action: cn.enaium.lsp.model.CodeAction) {
-        val edit = action.edit
-        if (edit != null) {
-            core.applyWorkspaceEditPublic(edit)
-            return
-        }
-        val cmd = action.command
-        if (cmd != null) {
-            val doc = codeActionDoc ?: core.activeDoc() ?: return
-            core.lsp.requestExecuteCommand(doc, cmd.command, cmd.arguments) { }
-            return
-        }
-        // Lazily-filled action: resolve, then apply whatever came back.
-        val doc = codeActionDoc ?: core.activeDoc() ?: return
-        if (action.data != null) {
-            core.lsp.requestCodeActionResolve(doc, action) { resolved ->
-                if (resolved != null) applyCodeAction(core, resolved)
-            }
-        }
+        val lspEditor = core.documents.lspEditorFor(doc) ?: return
+        lspEditor.requestCodeActions()
     }
 
     /** Opens the references panel for the symbol under the caret. */
@@ -1306,16 +1154,4 @@ class WorkspaceWindow(val dir: String) {
 
 /** Tiny 4-tuple for request-key tracking. */
 /** One inline-rename session: the symbol range being edited in place. */
-private data class InlineRenameSession(
-    val path: String,
-    val line: Int,
-    val startIndex: Int,
-    val endIndex: Int,
-    val original: String,
-    val text: String,
-    val screenX: Float,
-    val screenY: Float,
-    val focusInput: Boolean = true,
-)
-
 private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)

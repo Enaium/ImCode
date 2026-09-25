@@ -22,6 +22,8 @@ private class CliArgs(args: Array<String>) {
     var autoDebug: Boolean = false
     var noCompletionUi: Boolean = false
     var noEditorRender: Boolean = false
+    var quickFixProbe: Boolean = false
+    var saveProbe: Boolean = false
 
     init {
         var i = 0
@@ -42,6 +44,8 @@ private class CliArgs(args: Array<String>) {
                 "--auto-debug" -> autoDebug = true
                 "--no-completion-ui" -> noCompletionUi = true
                 "--no-editor-render" -> noEditorRender = true
+                "--quickfix-probe" -> quickFixProbe = true
+                "--save-probe" -> saveProbe = true
             }
             i++
         }
@@ -91,6 +95,18 @@ fun main(args: Array<String>) {
             else -> w.wantDestroy = true
         }
     }
+    // "Open Folder" with the current-window policy: the focused window swaps
+    // its workspace in place (the hook is here because this is where the
+    // windows live).
+    core.onAdoptWorkspaceInCurrentWindow = { ws ->
+        val target = windows.firstOrNull { it.isPrimary } ?: windows.firstOrNull()
+        if (target == null) {
+            false
+        } else {
+            target.adopt(ws)
+            true
+        }
+    }
     core.restoreWorkspaces()
 
     if (cli.lspLog) core.forceRpcLogging(true)
@@ -117,6 +133,8 @@ fun main(args: Array<String>) {
 
     var running = true
     var frame = 0
+    var qfStage = 0
+    var spStage = 0
     // Mouse pointer visibility while typing: hidden during text input so it
     // cannot sit over the text (and its hover) being written, shown again on
     // the first mouse movement. SDL.showCursor() toggles and returns the new
@@ -150,7 +168,12 @@ fun main(args: Array<String>) {
                     // Horizontal wheel: the scrollbar must move OPPOSITE to the
                     // trackpad swipe so the content follows the finger.
                     if (event.x != 0f) {
-                        cn.enaium.imgui.ImGui.getIO().addMouseWheelEvent(-2f * event.x, 0f)
+                        // Applied in the window the event belongs to: plain
+                        // ImGui.getIO() writes into whichever context happens
+                        // to be current, i.e. into another window's scroll.
+                        ctx.withContext {
+                            cn.enaium.imgui.ImGui.getIO().addMouseWheelEvent(-2f * event.x, 0f)
+                        }
                     }
                 }
                 is SDLEvent.TextInput -> {
@@ -171,7 +194,7 @@ fun main(args: Array<String>) {
                         // lsp-edit Editor reads text via queueTextInput, not
                         // the imgui IO queue).
                         val ws = ctx?.workspace
-                        if (ws != null) {
+                        if (ws != null && !core.hostFieldFocused && !ws.newFilePromptOpen) {
                             val doc = ws.activeFile?.let { core.documents.get(it) }
                             if (doc != null && doc.editor.isFocused) {
                                 doc.editor.queueTextInput(event.text)
@@ -206,6 +229,90 @@ fun main(args: Array<String>) {
 
         mailbox.drain()
 
+        // --save-probe: type into the document, inject a real Cmd/Ctrl+S and
+        // report whether the file on disk changed.
+        if (cli.saveProbe) {
+            val doc = core.activeDoc()
+            when (spStage) {
+                0 -> if (frame > 700 && doc != null) {
+                    doc.editor.setCursor(cn.enaium.lsp.edit.DocPos(0, 0))
+                    doc.editor.queueTextInput("// probe\n")
+                    println("SP-PROBE typed, dirty=${doc.dirty}")
+                    spStage = 1
+                }
+                1 -> if (frame > 730 && doc != null) {
+                    println("SP-PROBE before save: dirty=${doc.dirty}")
+                    cn.enaium.imgui.ImGui.getIO().addKeyEvent(cn.enaium.imgui.ImGuiKey.LEFT_SUPER, true)
+                    cn.enaium.imgui.ImGui.getIO().addKeyEvent(cn.enaium.imgui.ImGuiKey.S, true)
+                    spStage = 2
+                }
+                2 -> if (frame > 750) {
+                    cn.enaium.imgui.ImGui.getIO().addKeyEvent(cn.enaium.imgui.ImGuiKey.S, false)
+                    cn.enaium.imgui.ImGui.getIO().addKeyEvent(cn.enaium.imgui.ImGuiKey.LEFT_SUPER, false)
+                    spStage = 3
+                }
+                3 -> if (frame > 900 && doc != null) {
+                    val onDisk = cn.enaium.imcode.platform.ioFile(doc.path).readText()
+                    println(
+                        "SP-PROBE after save: dirty=${doc.dirty} diskHasProbe=${onDisk.contains("// probe")}",
+                    )
+                    spStage = 4
+                }
+            }
+        }
+
+        // --quickfix-probe: inject a real Alt+Enter over the caret and report
+        // whether the editor's code-action popup opened.
+        if (cli.quickFixProbe) {
+            val doc = core.activeDoc()
+            when (qfStage) {
+                0 -> if (frame > 700 && doc?.lspEditor != null) {
+                    doc.editor.setCursor(cn.enaium.lsp.edit.DocPos(12, 25))
+                    println("QF-PROBE injecting Alt+Enter (bound=true)")
+                    cn.enaium.imgui.ImGui.getIO().addKeyEvent(cn.enaium.imgui.ImGuiKey.LEFT_ALT, true)
+                    cn.enaium.imgui.ImGui.getIO().addKeyEvent(cn.enaium.imgui.ImGuiKey.ENTER, true)
+                    qfStage = 1
+                }
+                1 -> if (frame > 720) {
+                    cn.enaium.imgui.ImGui.getIO().addKeyEvent(cn.enaium.imgui.ImGuiKey.ENTER, false)
+                    cn.enaium.imgui.ImGui.getIO().addKeyEvent(cn.enaium.imgui.ImGuiKey.LEFT_ALT, false)
+                    qfStage = 2
+                }
+                2 -> if (frame > 900) {
+                    val ed = core.activeDoc()?.lspEditor
+                    println(
+                        "QF-PROBE result: active=${ed?.codeActionsActive} rect=${ed?.lastCodeActionPopupRect} " +
+                            "line12=[${core.activeDoc()?.editor?.buffer?.line(12)}]",
+                    )
+                    // Pick the first action with a real Enter press.
+                    println("QF-PROBE selecting first action with Enter")
+                    cn.enaium.imgui.ImGui.getIO().addKeyEvent(cn.enaium.imgui.ImGuiKey.ENTER, true)
+                    qfStage = 3
+                }
+                3 -> if (frame > 920) {
+                    cn.enaium.imgui.ImGui.getIO().addKeyEvent(cn.enaium.imgui.ImGuiKey.ENTER, false)
+                    qfStage = 4
+                }
+                4 -> if (frame > 1300) {
+                    val doc = core.activeDoc()
+                    println(
+                        "QF-PROBE applied: line12=[${doc?.editor?.buffer?.line(12)}] " +
+                            "active=${doc?.lspEditor?.codeActionsActive}",
+                    )
+                    qfStage = 5
+                }
+                5 -> if (frame > 2000) {
+                    val doc = core.activeDoc()
+                    println(
+                        "QF-PROBE diagnostics: count=${doc?.diagnostics?.size} " +
+                            "markers=${doc?.editor?.markers?.size} warnings=${doc?.warningCount} " +
+                            "detail=${doc?.diagnostics?.map { it.range.start.line }}",
+                    )
+                    qfStage = 6
+                }
+            }
+        }
+
         if (cli.foldTest && !folded && frame > 15) {
             folded = true
             val doc = core.activeDoc()
@@ -218,6 +325,9 @@ fun main(args: Array<String>) {
         }
 
         core.frameCount++
+        // Debug state arrives on the session's coroutines; apply it before the
+        // windows draw the toolbar and the editor's execution line.
+        core.debug.drain()
         for (w in windows.toList()) w.renderFrame()
         // a font-size change only needs one re-application per turn
         core.fontDirty = false

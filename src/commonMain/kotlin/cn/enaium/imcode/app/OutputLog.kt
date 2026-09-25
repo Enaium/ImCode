@@ -35,7 +35,16 @@ object OutputLog {
 
     fun info(tag: String, text: String) = append(tag, LogLevel.INFO, text)
     fun warn(tag: String, text: String) = append(tag, LogLevel.WARN, text)
-    fun error(tag: String, text: String) = append(tag, LogLevel.ERROR, text)
+    fun error(tag: String, text: String) {
+        append(tag, LogLevel.ERROR, text)
+        onError?.invoke(tag, text)
+    }
+
+    /**
+     * Called for every error written here, so the app can raise a balloon
+     * without every logging call site having to remember to.
+     */
+    var onError: ((tag: String, text: String) -> Unit)? = null
 
     fun snapshot(): List<Entry> = synchronized(lock) { entries.toList() }
 
