@@ -9,6 +9,7 @@ import cn.enaium.sdl.SDL
 import cn.enaium.sdl.SDLEvent
 import cn.enaium.sdl.SDLInitFlags
 import cn.enaium.sdl.SDLWindowEventType
+import cn.enaium.sdl.SDLWindowFlags
 
 private class CliArgs(args: Array<String>) {
     var frames: Int = Int.MAX_VALUE
@@ -65,6 +66,19 @@ fun main(args: Array<String>) {
     }
     println("SDL ${SDL.version()} (${SDL.revision()})")
     println("Video driver: ${SDL.getCurrentVideoDriver()}")
+
+    // macOS: without this hint a click on a window that is not the key window
+    // only activates the app — the click itself is swallowed, so the first
+    // click on a just-opened window does nothing and the second one is what
+    // "works". An editor wants the opposite: the caret lands where the user
+    // clicked, on the first try. SDL answers Cocoa's acceptsFirstMouse: from
+    // this hint, so it must be set before any window is created.
+    SDL.setHint("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1")
+    SDL.setHint("SDL_MAC_MOUSE_FOCUS_CLICKTHROUGH", "1")
+    // Activating on show/raise is the default; set it explicitly because the
+    // startup raise below relies on it to bring the app forward.
+    SDL.setHint("SDL_WINDOW_ACTIVATE_WHEN_SHOWN", "1")
+    SDL.setHint("SDL_WINDOW_ACTIVATE_WHEN_RAISED", "1")
 
     val mailbox = Mailbox()
     val core = AppCore(mailbox)
@@ -133,6 +147,15 @@ fun main(args: Array<String>) {
 
     var running = true
     var frame = 0
+    // Startup activation: SDL asks macOS to activate the app when the window is
+    // shown, but ImCode then spends a second or more building the font atlas
+    // and the first frame before it polls anything — an activation request that
+    // is not serviced in time is dropped, and the window opens behind every
+    // other one (its first click then being the activation click that macOS
+    // swallows). Re-assert it while the event loop is actually pumping, and
+    // stop for good once a window has been focused: after startup, focus is the
+    // user's business, not ours.
+    var startupFocusSettled = false
     var qfStage = 0
     var spStage = 0
     // Mouse pointer visibility while typing: hidden during text input so it
@@ -165,6 +188,10 @@ fun main(args: Array<String>) {
                     val id = event.windowId
                     val ctx = windows.firstOrNull { it.windowId == id } ?: primary
                     ctx.imgui.processEvent(event)
+                    // The console pane scrolls its own scrollback (or reports
+                    // the wheel to a full-screen application) while the pointer
+                    // is over it; elsewhere the wheel belongs to the UI.
+                    if (event.y != 0f) ctx.workspace?.terminal?.wheel(event.y)
                     // Horizontal wheel: the scrollbar must move OPPOSITE to the
                     // trackpad swipe so the content follows the finger.
                     if (event.x != 0f) {
@@ -192,9 +219,12 @@ fun main(args: Array<String>) {
                     } else {
                         // Feed typed characters into the focused editor (the
                         // lsp-edit Editor reads text via queueTextInput, not
-                        // the imgui IO queue).
+                        // the imgui IO queue) — or into the console pane while
+                        // it owns the keyboard.
                         val ws = ctx?.workspace
-                        if (ws != null && !core.hostFieldFocused && !ws.newFilePromptOpen) {
+                        if (ws != null && ws.terminal.wantsTextInput) {
+                            ws.terminal.textInput(event.text)
+                        } else if (ws != null && !core.hostFieldFocused && !ws.newFilePromptOpen) {
                             val doc = ws.activeFile?.let { core.documents.get(it) }
                             if (doc != null && doc.editor.isFocused) {
                                 doc.editor.queueTextInput(event.text)
@@ -222,8 +252,37 @@ fun main(args: Array<String>) {
                     }
                     val id = windowIdOf(event)
                     val ctx = if (id != null) windows.firstOrNull { it.windowId == id } else null
-                    (ctx ?: primary).imgui.processEvent(event)
+                    val target = ctx ?: primary
+                    if (event is SDLEvent.MouseButton) {
+                        // imgui applies a click at the position it knows when
+                        // the button event is processed, and pushes a position
+                        // queued after a button change to the NEXT frame. The
+                        // SDL backend queues the position last, so a click that
+                        // arrives without a preceding motion event — the first
+                        // click after the pointer entered a window that was not
+                        // focused, which is exactly the click that also
+                        // activates the app — is applied at the stale position
+                        // and lands on nothing; the click after it is the one
+                        // that "works". Feed the position first, the order
+                        // imgui's own SDL backend uses.
+                        target.imgui.processEvent(
+                            SDLEvent.MouseMotion(event.timestamp, event.windowId, event.x, event.y, 0f, 0f),
+                        )
+                    }
+                    target.imgui.processEvent(event)
                 }
+            }
+        }
+
+        // Re-assert startup activation while events are being pumped (see the
+        // note on startupFocusSettled). Bounded: give up after ~2 seconds so a
+        // launch the user left in the background never keeps stealing focus.
+        if (!startupFocusSettled) {
+            val focused = windows.any { (it.window.flags and SDLWindowFlags.INPUT_FOCUS) != 0uL }
+            if (focused || frame >= 200) {
+                startupFocusSettled = true
+            } else if (frame % 30 == 0) {
+                for (w in windows.toList()) w.window.raise()
             }
         }
 

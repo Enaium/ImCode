@@ -5,6 +5,10 @@ package cn.enaium.imcode.platform
  * kotlin.native.Platform / NSProcessInfo.
  */
 expect object Platform {
+
+    /** Local wall-clock time as `HH:mm:ss`, for log lines. */
+    fun timeOfDay(): String
+
     val isMac: Boolean
     val isWindows: Boolean
     val isLinux: Boolean

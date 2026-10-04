@@ -19,6 +19,7 @@ import cn.enaium.imcode.platform.ioFile
 import cn.enaium.lsp.edit.DocPos
 import cn.enaium.lsp.model.DocumentSymbol
 import cn.enaium.lsp.model.Position
+import cn.enaium.terminal.imgui.TerminalFonts
 
 
 /**
@@ -60,6 +61,12 @@ class WorkspaceWindow(val dir: String) {
     private var dockOutput = 0
     private var dockStructure = 0
     private var dockingReady = false
+
+    /** Terminal faces of the hosting ImGui context; set by the window each frame. */
+    var terminalFonts: TerminalFonts? = null
+
+    /** Bottom console: a shell behind a pty, drawn in its own docked window. */
+    val terminal = TerminalPanel(dir)
 
     /** Last active file; when it changes the tab bar scrolls to the tab. */
     private var lastActiveFile: String? = null
@@ -303,6 +310,7 @@ class WorkspaceWindow(val dir: String) {
         renderEditorsPane(core)
         renderStructurePane(core)
         renderOutputPane()
+        renderTerminalPane()
 
         // the status bar is the bottom strip of the window
         StatusBar.draw(core, this)
@@ -343,6 +351,9 @@ class WorkspaceWindow(val dir: String) {
         ImGui.dockBuilderDockWindow("Editors##ws-${dir}", editorsNode)
         ImGui.dockBuilderDockWindow("Structure##ws-${dir}", structureNode)
         ImGui.dockBuilderDockWindow("Output##ws-${dir}", outputNode)
+        // The console shares the bottom node: Output, LSP and Terminal are
+        // tabs of the same pane.
+        ImGui.dockBuilderDockWindow("Terminal##ws-${dir}", outputNode)
         ImGui.dockBuilderFinish(dockId)
         dockExplorer = explorerNode
         dockEditors = editorsNode
@@ -378,6 +389,16 @@ class WorkspaceWindow(val dir: String) {
         if (ImGui.begin("Output##ws-${dir}", null, 0)) {
             if (ImGui.isWindowFocused()) paneFocused = true
             output.draw()
+        }
+        ImGui.end()
+    }
+
+    private fun renderTerminalPane() {
+        if (dockOutput == 0) return
+        if (ImGui.begin("Terminal##ws-${dir}", null, 0)) {
+            if (ImGui.isWindowFocused()) paneFocused = true
+            terminal.fonts = terminalFonts
+            terminal.draw()
         }
         ImGui.end()
     }

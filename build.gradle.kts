@@ -32,6 +32,10 @@ kotlin {
             }
             implementation(libs.lsp.kmp)
             implementation(libs.lsp.edit)
+            // Terminal emulator behind the bottom console pane (terminal-imgui
+            // renders it; terminal-session pulls in the core, parser and pty).
+            implementation(libs.terminal.imgui)
+            implementation(libs.terminal.session)
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
             // Tree-sitter grammar bindings (tree-sitter-languages-kmp).

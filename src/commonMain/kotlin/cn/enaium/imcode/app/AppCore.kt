@@ -290,6 +290,8 @@ class AppCore(val mailbox: Mailbox) {
     }
 
     fun removeWorkspace(ws: WorkspaceWindow) {
+        // The console pane owns a shell process: it goes with the workspace.
+        ws.terminal.close()
         workspaces.remove(ws)
         if (focusedWorkspace == ws) focusedWorkspace = null
         pendingCloseWs = null

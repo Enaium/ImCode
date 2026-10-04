@@ -37,10 +37,7 @@ class RpcLogTransport(
 
     override fun send(message: String) {
         val line = render(message, outgoing = true)
-        if (line != null && enabled()) {
-            OutputLog.append(serverName, LogLevel.LSP, line)
-            logFull(message)
-        }
+        if (line != null && enabled()) OutputLog.append(serverName, LogLevel.LSP, withPayload(line, message))
         delegate.send(message)
     }
 
@@ -48,27 +45,49 @@ class RpcLogTransport(
         val message = delegate.receive()
         if (message != null) {
             val line = render(message, outgoing = false)
-            if (line != null && enabled()) {
-                OutputLog.append(serverName, LogLevel.LSP, line)
-                logFull(message)
-            }
+            if (line != null && enabled()) OutputLog.append(serverName, LogLevel.LSP, withPayload(line, message))
         }
         return message
     }
 
-    /** Appends the COMPLETE raw JSON-RPC frame (indented) so the console shows
-     *  the full structure, not just the summary. Content-bearing methods log
-     *  the byte size instead of the payload. */
-    private fun logFull(message: String) {
-        val method = try {
-            (json.parseToJsonElement(message) as? JsonObject)?.get("method") as? JsonPrimitive
+    /**
+     * The frame and its payload as ONE entry.
+     *
+     * They used to be two entries — summary, then an indented payload — but
+     * the console folds the payload under the summary, and the server's own
+     * stderr arrives asynchronously: it kept landing between the two, so the
+     * payload was no longer adjacent and stopped folding. One entry cannot be
+     * split by anything.
+     */
+    private fun withPayload(line: String, message: String): String {
+        val detail = detailFor(message) ?: return line
+        return line + "\n" + detail
+    }
+
+    /**
+     * Appends the indented follow-up entry the console expands: the complete
+     * raw JSON-RPC frame, so the structure is there rather than a one-line
+     * digest.
+     *
+     * Content-bearing methods carry the whole file, so their entry is the
+     * *shape* of the change plus its size — the payload itself would flood
+     * the console with megabytes per keystroke.
+     */
+    /** The payload line(s) for [message], or null when there is nothing to add. */
+    private fun detailFor(message: String): String? {
+        val root = try {
+            json.parseToJsonElement(message) as? JsonObject
         } catch (_: Throwable) {
             null
-        }?.content
-        if (method in contentMethods) {
-            OutputLog.append(serverName, LogLevel.LSP, "    (full payload elided: ${message.length} bytes)")
-        } else if (method != null || message.startsWith("[") || message.startsWith("{")) {
-            OutputLog.append(serverName, LogLevel.LSP, "    " + message.replace("\n", "\n    "))
+        }
+        val method = (root?.get("method") as? JsonPrimitive)?.content
+        return when {
+            method in contentMethods -> {
+                val summary = summarize(root?.get("params"))
+                "$summary (payload elided: ${message.length} bytes)"
+            }
+            method != null || message.startsWith("[") || message.startsWith("{") -> message
+            else -> null
         }
     }
 
@@ -80,42 +99,40 @@ class RpcLogTransport(
         } ?: return if (outgoing) "[send] $message" else "[recv] $message"
 
         val method = (root["method"] as? JsonPrimitive)?.content
-        val id = when (val v = root["id"]) {
-            is JsonPrimitive -> v.content
-            is JsonNull -> null
-            null -> null
-            else -> null
-        }
+        val id = (root["id"] as? JsonPrimitive)?.content
+        val stamp = cn.enaium.imcode.platform.Platform.timeOfDay()
 
-        return if (method != null) {
-            // request or notification (client -> server, or server -> client)
-            val idPart = id?.let { " req#$it" } ?: ""
-            val summary = summarize(root["params"])
-            if (outgoing) {
-                if (id != null) pending[id] = Pending(method, System.nanoTime(), summary)
-                "[send] $method$idPart${if (summary.isEmpty()) "" else " $summary"}"
-            } else {
-                "${
-                if (outgoing) "[send]" else "[recv]"
-            } $method$idPart${if (summary.isEmpty()) "" else " $summary"}"
+        return when {
+            // request or notification, in either direction
+            method != null -> {
+                // The collapsed line names the frame only — the payload is
+                // the indented follow-up entry the console expands on click.
+                val verb = if (id != null) {
+                    if (outgoing) "Sending request" else "Received request"
+                } else {
+                    if (outgoing) "Sending notification" else "Received notification"
+                }
+                val what = if (id != null) "$method - ($id)" else method
+                "[$stamp] $verb '$what'."
             }
-        } else if (id != null) {
             // response to a request we sent
-            val req = pending.remove(id)
-            val err = root["error"] != null
-            val durMs = req?.let { (System.nanoTime() - it.startNanos) / 1_000_000 } ?: -1L
-            val methodPart = req?.method ?: "response"
-            val durPart = if (durMs >= 0) "${durMs}ms" else "?"
-            val body = if (err) {
-                val code = (root["error"] as? JsonObject)?.get("code")?.toString() ?: "?"
-                "ERROR code=$code"
-            } else {
-                val summary = summarize(root["result"])
-                if (summary.isEmpty()) "(no result)" else summary
+            id != null -> {
+                val req = pending.remove(id)
+                val methodPart = req?.method ?: "response"
+                val durMs = req?.let { (System.nanoTime() - it.startNanos) / 1_000_000 } ?: -1L
+                val durPart = if (durMs >= 0) " in ${durMs}ms" else ""
+                val failed = root["error"] != null
+                // A failed request says so without being expanded; a result
+                // is the follow-up entry.
+                val body = if (failed) {
+                    val code = (root["error"] as? JsonObject)?.get("code")?.toString() ?: "?"
+                    " ERROR code=$code"
+                } else {
+                    ""
+                }
+                "[$stamp] Received response '$methodPart - ($id)'$durPart.$body"
             }
-            "[recv] $methodPart req#$id $durPart $body"
-        } else {
-            null
+            else -> null
         }
     }
 

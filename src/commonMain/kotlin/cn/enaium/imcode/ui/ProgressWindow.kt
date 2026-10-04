@@ -28,18 +28,21 @@ internal object ProgressWindow {
             return
         }
         val openArr = BooleanArray(1) { core.showProgress }
-        ImGui.setNextWindowSize(ImVec2(420f, 0f), ImGuiCond.FIRST_USE_EVER)
+        // A size of its own, not one fitted to the content: the bars fill the
+        // window, and an auto-resizing window then grows to fit them, which
+        // grows the bars again — the width ran away. The user can still
+        // resize it; FIRST_USE_EVER only sets where it starts.
+        ImGui.setNextWindowSize(ImVec2(420f, 200f), ImGuiCond.FIRST_USE_EVER)
         // Above the status bar, right-aligned over the progress indicator —
         // where IntelliJ puts its background tasks popup. Pivot (1,1) anchors
-        // the window's bottom-right corner there, so its content-driven height
-        // does not matter; FIRST_USE_EVER leaves it movable afterwards.
+        // the window's bottom-right corner there.
         val display = ImGui.getIO().displaySize
         ImGui.setNextWindowPos(
             ImVec2(display.x - MARGIN, display.y - StatusBar.height() - MARGIN),
             ImGuiCond.FIRST_USE_EVER,
             ImVec2(1f, 1f),
         )
-        val flags = ImGuiWindowFlags.ALWAYS_AUTO_RESIZE or ImGuiWindowFlags.NO_DOCKING
+        val flags = ImGuiWindowFlags.NO_DOCKING
         if (!ImGui.begin("Background Tasks", openArr, flags)) {
             ImGui.end()
             return
@@ -59,6 +62,7 @@ internal object ProgressWindow {
                     ProgressCenter.finish(task.id)
                 }
             }
+            // Full width of the window's content region, which is now stable.
             val fraction = task.fraction
             ImGui.progressBar(fraction ?: -1f, ImVec2(-1f, 0f), fraction?.let { "${(it * 100).toInt()}%" } ?: "")
         }

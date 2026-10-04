@@ -118,6 +118,17 @@ data class Config(
      * Applies after a restart, like [mainFontPath].
      */
     val fallbackFontPath: String = "",
+    /**
+     * TTF/OTF/TTC for the terminal pane; empty uses the platform's monospace
+     * face. Applies after a restart, like [mainFontPath].
+     */
+    val terminalFontPath: String = "",
+    /**
+     * Merged into the terminal faces for the glyphs they lack (CJK, symbols,
+     * box drawing) — without one every such code point renders as `?`; empty
+     * uses the platform's CJK fallback.
+     */
+    val terminalFallbackFontPath: String = "",
     /** Log every LSP RPC frame into the "LSP" output tab. */
     val rpcLogging: Boolean = true,
     /** Reopen the previous session's workspaces on startup; off = show the project list page. */

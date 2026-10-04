@@ -15,11 +15,20 @@ object LogLevel {
  * loop all append here. Rendered in every workspace's bottom panel.
  */
 object OutputLog {
-    data class Entry(val tag: String, val level: Int, val text: String)
+    data class Entry(
+        val tag: String,
+        val level: Int,
+        val text: String,
+        val seq: Long = 0,
+    )
 
     private const val MAX_ENTRIES = 4000
     private val lock = Any()
     private val entries = ArrayDeque<Entry>()
+
+    /** Monotonic id per entry: the UI keys expansion state on it, so the
+     *  state survives the ring buffer dropping entries from the front. */
+    private var nextSeq = 0L
     @Volatile
     var revision = 0
         private set
@@ -28,12 +37,13 @@ object OutputLog {
         val safe = text.replace('\r', ' ')
         synchronized(lock) {
             if (entries.size >= MAX_ENTRIES) entries.removeFirst()
-            entries.addLast(Entry(tag, level, safe))
+            entries.addLast(Entry(tag, level, safe, nextSeq++))
         }
         revision++
     }
 
     fun info(tag: String, text: String) = append(tag, LogLevel.INFO, text)
+
     fun warn(tag: String, text: String) = append(tag, LogLevel.WARN, text)
     fun error(tag: String, text: String) {
         append(tag, LogLevel.ERROR, text)

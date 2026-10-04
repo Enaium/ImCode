@@ -30,9 +30,11 @@ class RpcLogTransportTest {
         val entries = OutputLog.snapshot()
         val texts = entries.joinToString("\n") { "[${it.level}] ${it.text}" }
         println("----\n$texts\n----")
-        assertTrue(texts.contains("[send] textDocument/completion req#40"), "summary line missing:\n$texts")
-        // nested params render WITH their values (position coords, triggerKind)
-        assertTrue(texts.contains("position={line=12 character=4}"), "rich summary missing:\n$texts")
+        // The collapsed line names the frame; its payload is the follow-up.
+        assertTrue(
+            texts.contains("Sending request 'textDocument/completion - (40)'."),
+            "frame line missing:\n$texts",
+        )
         assertTrue(texts.contains(""""method":"textDocument/completion""""), "full JSON line missing:\n$texts")
         assertTrue(texts.contains(""""triggerKind":1"""), "full params missing:\n$texts")
     }

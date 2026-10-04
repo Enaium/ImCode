@@ -109,8 +109,11 @@ class SettingsWindow {
         select: (Config) -> String,
         update: (Config, String) -> Config,
     ) {
+        // The label goes on its own line: drawn next to the input (ImGui's
+        // default) it lands past the right edge once the input takes the row.
+        ImGui.textUnformatted(label)
         ImGui.setNextItemWidth((ImGui.getContentRegionAvail().x - 170f).coerceAtLeast(120f))
-        val typed = ImGui.inputText("$label##font-$label", select(cfg))
+        val typed = ImGui.inputText("##font-$label", select(cfg))
         if (typed != null && typed != select(cfg)) {
             core.updateConfig(update(cfg, typed.trim()))
             core.saveState()
@@ -148,10 +151,16 @@ class SettingsWindow {
         }
         drawFontPath(core, cfg, "Main font", Config::mainFontPath) { c, v -> c.copy(mainFontPath = v) }
         drawFontPath(core, cfg, "Fallback font", Config::fallbackFontPath) { c, v -> c.copy(fallbackFontPath = v) }
+        ImGui.separatorText("Terminal")
+        drawFontPath(core, cfg, "Terminal font", Config::terminalFontPath) { c, v -> c.copy(terminalFontPath = v) }
+        drawFontPath(core, cfg, "Terminal fallback", Config::terminalFallbackFontPath) { c, v ->
+            c.copy(terminalFallbackFontPath = v)
+        }
         textDisabledWrapped(
             "Font size applies immediately (restart ImCode to have the glyphs re-rasterized crisply at the new size). " +
                 "Font files are read when a window builds its font atlas, so a changed path applies after a restart. " +
-                "The fallback is merged into the main font for the glyphs it lacks (CJK, symbols).",
+                "The fallback is merged into the main font for the glyphs it lacks (CJK, symbols); the terminal uses " +
+                "the platform's monospace face and CJK fallback when its paths are empty.",
         )
         cfg = core.config
         val rpc = BooleanArray(1) { cfg.rpcLogging }

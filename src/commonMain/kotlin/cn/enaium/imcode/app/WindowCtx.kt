@@ -16,6 +16,8 @@ import cn.enaium.sdl.SDL
 import cn.enaium.sdl.SDLColor
 import cn.enaium.sdl.SDLWindow
 import cn.enaium.sdl.SDLWindowFlags
+import cn.enaium.terminal.imgui.TerminalFonts
+import cn.enaium.terminal.imgui.installTerminalFonts
 
 /** What a window currently hosts. */
 enum class WindowKind { HUB, WORKSPACE }
@@ -57,6 +59,10 @@ class WindowCtx(
     /** Set when this window may be torn down after the current frame. */
     @Volatile
     var wantDestroy = false
+
+    /** Terminal faces of this context's atlas; handed to the workspace's console pane. */
+    var terminalFonts: TerminalFonts? = null
+        private set
 
     /** Window id, matches [cn.enaium.sdl.SDLEvent] windowId fields. */
     val windowId: Int get() = window.id
@@ -117,6 +123,11 @@ class WindowCtx(
             ),
             density = density,
         )
+        // The console pane draws from the same atlas, so its faces go in
+        // before the build. It keeps a monospace face of its own: the editor
+        // font may be proportional, which would break the cell grid.
+        val terminalSettings = terminalFontSettings(cfg, density)
+        terminalFonts = installTerminalFonts(fonts, terminalSettings)
         check(fonts.build()) { "font atlas build failed" }
         val tex = fonts.getTexDataAsRGBA32()
         val texId = backend.uploadFontTexture(tex.pixels, tex.width, tex.height)
@@ -125,7 +136,10 @@ class WindowCtx(
         OutputLog.info(
             "App",
             "fonts: main=${cfg.mainFontPath.ifBlank { "built-in" }}, " +
-                "fallback=${cfg.fallbackFontPath.ifBlank { "none" }}, size=${cfg.fontSize}",
+                "fallback=${cfg.fallbackFontPath.ifBlank { "none" }}, size=${cfg.fontSize}, " +
+                "terminal=${terminalSettings.regularPath ?: "built-in"}, " +
+                "terminal fallback=${terminalSettings.fallbackPath ?: "none"}, " +
+                "terminal extras=${terminalSettings.extraFallbackPaths.joinToString(",") { it.substringAfterLast('/') }}",
         )
     }
 
@@ -172,8 +186,12 @@ class WindowCtx(
         activeDoc?.editor?.keyboardOwnedByHost = hostFieldFocused
         val editorOwnsKeys = !hostFieldFocused && (activeDoc?.editor?.isFocusedStrict == true ||
             activeDoc?.completionActive == true)
+        // The console pane owns the keyboard while it has it too: with ImGui's
+        // keyboard navigation on, Tab and the arrows would move the focus to
+        // another widget instead of reaching the shell.
+        val terminalOwnsKeys = workspace?.terminal?.wantsTextInput == true
         val io = ImGui.getIO()
-        io.configFlags = if (editorOwnsKeys) {
+        io.configFlags = if (editorOwnsKeys || terminalOwnsKeys) {
             io.configFlags and ImGuiConfigFlags.NAV_ENABLE_KEYBOARD.inv()
         } else {
             io.configFlags or ImGuiConfigFlags.NAV_ENABLE_KEYBOARD
@@ -205,6 +223,8 @@ class WindowCtx(
 
         val ws = workspace
         if (ws != null) {
+            // The console pane draws with this context's atlas faces.
+            ws.terminalFonts = terminalFonts
             ws.draw(core)
             // The floating UI is drawn by every window; drawAux itself skips
             // the ones that did not ask for it, so a dialog opened in one
@@ -220,16 +240,18 @@ class WindowCtx(
 
         // SDL only emits TextInput events while text input is active, and
         // the lsp-edit Editor never sets the imgui io.wantTextInput flag.
-        // Mirror BOTH text consumers on the SDL window: the focused code
-        // editor (so letters reach it) and any focused imgui edit box
+        // Mirror ALL text consumers on the SDL window: the focused code
+        // editor (so letters reach it), any focused imgui edit box
         // (search/rename/settings — their io.wantTextInput drives the
-        // backend's startTextInput). Stopping while an edit box is active
-        // killed their typing. Stop only when neither wants text, so the
+        // backend's startTextInput) and the console pane while it has the
+        // keyboard. Stopping while an edit box is active
+        // killed their typing. Stop only when none of them wants text, so the
         // system IME does not stay up and block clicks on the rest of the UI.
         // Strict keyboard focus only: hover must not keep the system IME
         // alive (that blocked clicks on the rest of the UI).
         val editorFocused = ws?.activeFile?.let { core.documents.get(it)?.editor?.isFocusedStrict } == true
-        val wantText = io.wantTextInput || editorFocused
+        val terminalFocused = ws?.terminal?.wantsTextInput == true
+        val wantText = io.wantTextInput || editorFocused || terminalFocused
         val inputActive = cn.enaium.sdl.SDL.textInputActive(windowId)
         if (wantText && !inputActive) {
             cn.enaium.sdl.SDL.startTextInput(windowId)
